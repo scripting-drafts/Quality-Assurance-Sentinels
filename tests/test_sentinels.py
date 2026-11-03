@@ -370,6 +370,87 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(ok, detail)
 
 
+class EscalationContextTests(unittest.TestCase):
+    """A crash escalation is only useful if it says when, which process, which build."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def test_install_script_targets_repo_root_and_all_phases(self):
+        from sentinels import config
+
+        script = (config.ROOT / "install.sh").read_text()
+        self.assertIn('dirname "${BASH_SOURCE[0]}")"', script)
+        self.assertNotIn('BASH_SOURCE[0]}")/..', script)
+        for needle in ("src install", "deploy-phase2", "install-cron", "install-system.sh"):
+            self.assertIn(needle, script)
+
+    def test_package_context_lists_every_installed_package(self):
+        from unittest import mock
+        from sentinels import packages
+
+        fake = "alpha\t1.0\nbeta\t2.2\n"
+        packages.installed.cache_clear()
+        try:
+            with mock.patch.object(packages, "run", return_value=(0, fake, "")):
+                packages.installed.cache_clear()
+                ctx = packages.context(None)
+            self.assertEqual(ctx["count"], 2)
+            self.assertEqual(ctx["packages"], ["alpha=1.0", "beta=2.2"])
+        finally:
+            packages.installed.cache_clear()
+
+    def test_deep_request_carries_pid_time_and_packages(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, deep
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config, "DEEP_REQUEST_DIR", pathlib.Path(tmp)):
+                path = deep.enqueue(
+                    conn, reason="auto:crash.core2", pid=4242, comm="qa_sample",
+                    ts="2026-11-03T08:00:00Z",
+                    packages=["alpha=1.0", "beta=2.2"],
+                    package_owner={"package": "alpha", "version": "1.0"},
+                )
+                request = json.loads(pathlib.Path(path).read_text())
+        self.assertEqual(request["pid"], 4242)
+        self.assertEqual(request["event_ts"], "2026-11-03T08:00:00Z")
+        self.assertEqual(request["packages"], ["alpha=1.0", "beta=2.2"])
+        self.assertEqual(request["package_owner"]["package"], "alpha")
+        self.assertEqual(request["package_count"], 2)
+
+    def test_crash_escalation_passes_pid_time_and_packages(self):
+        from unittest import mock
+        from sentinels import deep, detect
+
+        conn = self._conn()
+        finding = {
+            "id": 1, "severity": "critical", "rule": "crash.core2", "subject": "qa_sample",
+            "fingerprint": "fp", "case_id": None, "pid": 4242,
+            "ts": "2026-11-03T08:00:00Z", "exe": "/usr/bin/qa_sample", "detail": "SIGSEGV",
+        }
+        ctx = {"count": 1, "packages": ["alpha=1.0"],
+               "owner": {"package": "alpha", "version": "1.0"}}
+        with mock.patch.object(deep, "enqueue", return_value="req") as enqueue, \
+             mock.patch.object(detect.packages, "context", return_value=ctx):
+            detect.queue_escalations(conn, [finding])
+        kwargs = enqueue.call_args.kwargs
+        self.assertEqual(kwargs["pid"], 4242)
+        self.assertEqual(kwargs["ts"], "2026-11-03T08:00:00Z")
+        self.assertEqual(kwargs["packages"], ["alpha=1.0"])
+        self.assertEqual(kwargs["package_owner"]["package"], "alpha")
+
+
 class InventoryCadenceTests(unittest.TestCase):
     def test_baseline_uses_base_interval(self):
         from sentinels import config
@@ -678,10 +759,16 @@ class RaiseGateTests(unittest.TestCase):
             self.assertEqual(result["viable"], 1, result)
             directory = pathlib.Path(result["staged"][0])
             self.assertTrue((directory / "ticket.md").exists())
-            self.assertTrue((directory / "evidence" / "rows.json").exists())
+            self.assertTrue((directory / "evidence" / "logs.json").exists())
             self.assertTrue((directory / "evidence" / "trace.md").exists())
             self.assertTrue((directory / "evidence" / "manifest.json").exists())
             self.assertTrue((directory / "HOWTO.md").exists())
+            archive = directory / "evidence.tar.gz"
+            self.assertTrue(archive.exists())
+            import tarfile
+
+            with tarfile.open(archive) as bundle:
+                self.assertIn("evidence/logs.json", bundle.getnames())
             self.assertNotIn(socket.gethostname(), (directory / "ticket.md").read_text())
             import json
 

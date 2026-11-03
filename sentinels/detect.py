@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from . import boot, config, db, triage
+from . import boot, config, db, packages, triage
 from .util import iso, parse_iso, sha256_text, utcnow
 
 # journal rules, highest severity first
@@ -87,6 +87,8 @@ def _crash_findings(conn, since: str) -> list[dict]:
                 "rule": rule,
                 "severity": severity,
                 "subject": subject,
+                "pid": row["pid"],
+                "exe": row["exe"],
                 "detail": f"{row['sig']} affinity={row['cpus_allowed'] or 'unknown'} "
                           f"core2={row['core2_involved']}",
                 "case_id": _case_id(conn, subject),
@@ -123,6 +125,7 @@ def _event_findings(conn, since: str) -> list[dict]:
                 "rule": rule,
                 "severity": severity,
                 "subject": unit or "kernel",
+                "pid": row["pid"],
                 "detail": msg[:1500],
                 "case_id": _case_id(conn, unit, msg),
             }
@@ -225,10 +228,15 @@ def queue_escalations(conn, findings: list[dict], cooldown_s: int | None = None)
         age = (utcnow() - parse_iso(last_req)).total_seconds() if last_req else 1e9
         if age < cooldown:
             continue
+        # a crash carries its pid, its moment and the packages installed then
+        crash = finding["rule"].startswith("crash")
+        pkg = packages.context(finding.get("exe")) if crash else {}
         queued.append(
             deep.enqueue(
                 conn, case_id=finding.get("case_id"), finding_id=finding["id"],
                 reason=f"auto:{finding['rule']}", comm=finding["subject"],
+                pid=finding.get("pid"), ts=finding.get("ts"),
+                packages=pkg.get("packages"), package_owner=pkg.get("owner"),
             )
         )
         db.meta_set(conn, key, iso())

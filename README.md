@@ -53,7 +53,7 @@ make -C src install
 
 `tick` performs one monitoring pass; `phase1` is an alias. The cron installation also configures a daily run at 08:00. The data and reports remain on the local machine.
 
-> **Installer note:** The repository also contains `install.sh`, but the version reviewed on 2026-11-03 resolves its project root to the parent directory of the repository. Until that path is corrected, use the explicit commands above instead of relying on `./install.sh`.
+> **Installer note:** `./install.sh` covers every phase in one run: it builds the sampler, initialises the store, runs a first tick, installs phase 2 (deep-trace path unit plus eBPF) and schedules phase 1 with cron. Use `--systemd` to schedule phase 1 with a systemd timer instead, or `--no-phase2` to keep it phase-1 only.
 
 ### Check monitoring activity
 

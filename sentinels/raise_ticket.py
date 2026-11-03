@@ -16,15 +16,19 @@ Layout (one directory per ticket, never a flat pile):
     raise/<vendor>-<slug>-<key8>/
         ticket.md            the redacted draft, ready to post
         HOWTO.md             what to do with it, and what not to omit
-        evidence/rows.json   the exact observations behind it (redacted)
+        evidence/ticket.md   copy of the staged draft for self-contained evidence
+        evidence/logs.json   the exact observations behind it (redacted)
         evidence/trace.md    signature → events → stops → correlation → draft
         evidence/manifest.json  hashes, provenance, scores
+        evidence.tar.gz      compressed copy of evidence/, rebuilt on every stage
 """
 from __future__ import annotations
 
+import gzip
 import json
 import re
 import shutil
+import tarfile
 
 from . import boot, classify, config, correlate, report, tickets, trace, util
 from .util import iso, sha256_text, utcnow
@@ -139,6 +143,33 @@ def _write(path, text: str) -> str:
     return sha256_text(text)
 
 
+def _archive_evidence(directory) -> str:
+    """Bundle evidence/ into a deterministic tar.gz next to it.
+
+    The archive is a convenience for attaching the record elsewhere; the
+    evidence directory stays authoritative and is never removed.
+    """
+    evidence = directory / "evidence"
+    archive = directory / "evidence.tar.gz"
+    temporary = archive.with_name(archive.name + ".tmp")
+    with temporary.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+            with tarfile.open(fileobj=gz, mode="w") as tf:
+                for path in sorted(evidence.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    info = tf.gettarinfo(
+                        str(path), arcname=f"evidence/{path.relative_to(evidence)}"
+                    )
+                    info.mtime = 0
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ""
+                    with path.open("rb") as source:
+                        tf.addfile(info, source)
+    temporary.replace(archive)
+    return str(archive)
+
+
 def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) -> dict:
     """Create the per-ticket directory with its own evidence."""
     directory = config.RAISE_DIR / _dir_name(draft, issue)
@@ -155,10 +186,13 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) ->
         except OSError:
             ticket_text = ""
     hashes["ticket.md"] = _write(directory / "ticket.md", ticket_text)
+    hashes["evidence/ticket.md"] = _write(
+        directory / "evidence" / "ticket.md", ticket_text
+    )
 
     rows = _redact_rows(issue.get("rows") or [])
-    hashes["evidence/rows.json"] = _write(
-        directory / "evidence" / "rows.json",
+    hashes["evidence/logs.json"] = _write(
+        directory / "evidence" / "logs.json",
         json.dumps(rows, indent=2, sort_keys=True, default=str) + "\n",
     )
 
@@ -215,9 +249,11 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) ->
 
     _write(directory / "HOWTO.md", _howto(issue, verdict))
     _record_history(directory, issue, verdict, hashes)
+    archive = _archive_evidence(directory)
 
     return {
         "directory": str(directory),
+        "archive": archive,
         "issue_key": issue["key"],
         "vendor": issue["vendor"],
         "signature": issue["signature"][:120],
@@ -374,7 +410,7 @@ def _howto(issue: dict, verdict: dict) -> str:
 Vendor: **{issue['vendor']}** — {issue['kind']} cluster `{issue['key']}`
 
 1. Read `ticket.md`. It is already redacted; do not add host or identity data.
-2. Check `evidence/rows.json` and `evidence/trace.md` still describe what you saw.
+2. Check `evidence/logs.json` and `evidence/trace.md` still describe what you saw.
 3. Attach the evidence bundle named in `evidence/manifest.json` (verify its SHA-256).
 4. Post through the vendor channel in `ticket.md`. Submission is manual by design.
 5. Keep `evidence/manifest.json`: it is what makes this ticket auditable later.

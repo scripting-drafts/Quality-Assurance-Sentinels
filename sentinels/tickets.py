@@ -58,40 +58,24 @@ def _environment() -> list[str]:
     return lines
 
 
-def _repro_block(vendor: str) -> list[str]:
-    if vendor == "mozilla":
-        return [
-            "1. Use a fresh Firefox profile (never a logged-in profile).",
-            "2. Pin the browser to the SMT siblings of physical core 2: "
-            f"`taskset -c {','.join(map(str, config.CORE2_CPUS))} firefox-esr --no-remote --new-instance`.",
-            "3. Load the page that triggered WebRender/compositor work until the tab or GPU process crashes.",
-            "4. Control run: same steps pinned to another physical core (e.g. `taskset -c 0,6`).",
-            "5. Compare `about:crashes` minidumps and the sentinel crash table.",
-        ]
-    if vendor == "canonical-kernel":
-        return [
-            "1. Reproduce the workload on the installed system; keep the sentinel running.",
-            "2. Run the core-2 live test from a disposable live USB: `~/core2/verify-core2-live.sh`.",
-            "3. Compare suspect (`2,8`) against control (`0,6`) for equal duration.",
-            "4. Capture `journalctl -k -b -1`, `coredumpctl info`, and the latest evidence bundle.",
-        ]
-    if vendor == "nvidia":
-        return [
-            "1. Reproduce with the vendor driver loaded; watch `nvidia-smi -q` and kernel `Xid` lines.",
-            "2. Capture `nvidia-bug-report.sh` output and the sentinel evidence bundle.",
-            "3. Compare with the open-source driver if available.",
-        ]
-    if vendor == "hardware":
-        return [
-            "1. The sentinel records per-core affinity and crash correlation continuously.",
-            f"2. From a disposable live USB, stress physical core 2 (`2,8`) and a control core (`0,6`).",
-            "3. Capture MCE/EDAC/thermal data and the evidence bundle.",
-            "4. Replace or re-seat the CPU only after the vendor confirms the diagnosis.",
-        ]
-    return [
-        "1. Reproduce with the sentinel running (`~/qa-sentinels/bin/qa status`).",
-        "2. Attach the latest evidence bundle.",
-    ]
+_COMMAND_LINE = re.compile(r"^\s*Command Line:\s*(.+?)\s*$", re.M)
+
+
+def _repro_block(issue: dict) -> list[str]:
+    """Return reproduction steps only when the evidence names a trigger.
+
+    Event clusters carry no reliable trigger, so they get no Reproduction
+    section instead of generic vendor boilerplate.
+    """
+    for row in issue.get("rows") or []:
+        match = _COMMAND_LINE.search(row.get("context") or "")
+        if match:
+            command = match.group(1).strip()
+            return [
+                f"1. Run `{command}`.",
+                "2. Capture the resulting crash and `coredumpctl info` output.",
+            ]
+    return []
 
 
 def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dict]:
@@ -217,9 +201,6 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
     lines = [
         f"# {title}",
         "",
-        "> **DRAFT ONLY — NOT SUBMITTED.** Review, attach the evidence bundle, then post",
-        f"> through {meta['channel']}. Remove nothing from the core-2 evidence section.",
-        "",
         f"- Vendor / channel: **{meta['name']}** — {meta['channel']}",
         f"- Cluster key: `{issue['key']}`",
         f"- Occurrences: **{issue['count']}** between `{issue['first']}` and `{issue['last']}`",
@@ -228,9 +209,30 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         "",
         *_environment(),
         "",
+    ]
+    if issue.get("kind") == "crash":
+        # vendors need the exact build, not just "Ubuntu 22.04"
+        from . import packages as pkgmod
+
+        exe = next((r.get("exe") for r in rows if r.get("exe")), None)
+        pkg = pkgmod.context(exe)
+        owner = pkg.get("owner") or {}
+        lines += [
+            "## Installed packages",
+            "",
+            f"- Owning package: `{owner.get('package', 'unknown')}` "
+            f"{owner.get('version', '')}".rstrip(),
+            f"- Package inventory at draft time: **{pkg['count']}** packages",
+            "",
+            "```",
+            *(pkg["packages"] or ["(package list unavailable)"]),
+            "```",
+            "",
+        ]
+    lines += [
         "## What happens",
         "",
-        f"A recurring {issue['kind']} cluster was observed by the local QA sentinel:",
+        f"A recurring {issue['kind']} cluster was observed",
         "",
         "```",
         redact(example)[:3000] or "(no message captured)",
@@ -239,16 +241,18 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
     ]
     if issue.get("notes"):
         lines += ["## Consistency", "", issue["notes"], ""]
+    if any("sig" in row for row in rows):
+        lines += [
+            "## Physical core 2 correlation (required, do not omit)",
+            "",
+            *_core2_table(rows),
+            "",
+        ]
+    repro = _repro_block(issue)
+    if repro:
+        lines += ["## Reproduction", "", *repro, ""]
     lines += [
-        "## Physical core 2 correlation (required, do not omit)",
-        "",
-        *_core2_table(rows),
-        "",
-        "## Reproduction",
-        "",
-        *_repro_block(issue["vendor"]),
-        "",
-        "## Evidence",
+        "## Evidence (internal)",
         "",
     ]
     if bundle:
@@ -274,12 +278,6 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         ]
     lines += [
         "",
-        "## Requested action",
-        "",
-        "Confirm whether the fault is in this component, request additional traces, and advise",
-        "on a workaround. The sentinel continues collecting 1-minute kernel/memory/CPU samples,",
-        "a 3-hour layered inventory, and startup reports.",
-        "",
         "## Reporter",
         "",
     ]
@@ -289,7 +287,6 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
             lines.append(f"- LinkedIn: {identity['LINKEDIN']}")
         if identity.get("GITHUB"):
             lines.append(f"- GitHub: {identity['GITHUB']}")
-        lines.append("- Consent: identity release approved in `config/identity.env` (TICKET_CONSENT=1).")
     else:
         lines.append(
             "- Identity withheld. Set `TICKET_CONSENT=1` plus FULL_NAME/LINKEDIN/GITHUB "

@@ -1,0 +1,40 @@
+# Root-only evidence (optional)
+
+The sentinel itself runs unprivileged. It already reads the journal through the
+`adm` group, user coredumps and all of `/proc` and `/sys`.
+
+Root adds: full `dmidecode` (memory slots, board serials), `smartctl`, `lspci -vv`,
+`cpupower`, MCE/EDAC counters, and coredumps owned by other users.
+
+Two options:
+
+1. `sudo root/install-system.sh --takeover` — phase-1 systemd timer plus a phase-2
+   path unit (`qa-sentinel-deep.path`). Both run as your account. Phase 2 adds
+   `CAP_SYS_ADMIN`, `CAP_PERFMON`, `CAP_BPF`, `CAP_SYS_PTRACE`, `CAP_DAC_READ_SEARCH`,
+   `CAP_DAC_OVERRIDE` and `CAP_SYS_RAWIO` for tracefs/perf/hardware probes. No root shell.
+   Phase-2-only per-host automation: `bin/qa deploy-phase2` (idempotent, keeps cron).
+2. `sudo root/collect-root-evidence.sh` — one-shot read-only hardware/MCE dump.
+
+Phase 1 never has tracing capabilities. Phase 2 starts only when a JSON request
+appears in `triage/core2/deep-requests/`, then archives it after the run. Manual run:
+
+    sudo ~/qa-sentinels/bin/qa deep --case 1 --duration 30 --perf-record
+
+Run `sudo root/collect-root-evidence.sh` when a bundle needs that depth. Output
+goes to `var/root-evidence/<utc>/` with mode 0700 and is **not** auto-bundled.
+Review it and copy only the relevant, redacted excerpts into a vendor ticket.
+
+## eBPF tracer
+
+`root/ebpf/` builds a verifier-friendly tracer for `sched_switch`,
+`sched_wakeup` and user/kernel page faults, with per-CPU and per-comm counters.
+
+    root/ebpf/bootstrap-ebpf.sh   # root: apt; non-root: local toolchain in ./toolchain
+    root/ebpf/build.sh            # produces bin/qa_ebpf + bin/qa_trace.bpf.o
+
+Phase 2 runs it only when `CAP_BPF` is present (the deep service has it).
+Without the build, phase 2 records `eBPF: not built` and still runs ftrace/perf.
+Phase 1 never has BPF capability.
+
+Do not disable lockdown, set `perf_event_paranoid=-1`, load unsigned modules or
+give the sentinel blanket sudo. None of that is needed for this QA job.

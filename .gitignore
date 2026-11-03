@@ -1,0 +1,27 @@
+# Runtime state and evidence (host-local, never publish)
+var/
+journal/
+evidence/
+tickets/
+triage/
+config/identity.env
+!config/identity.env.example
+
+# Generated build artifacts (build per host)
+bin/qa_sample
+bin/qa_ebpf
+bin/qa_trace.bpf.o
+bin/qa_ebpf.build.json
+src/qa_sample
+root/ebpf/qa_ebpf
+root/ebpf/qa_trace.bpf.o
+root/ebpf/vmlinux.h
+toolchain/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editors / OS
+.DS_Store
+*.swp

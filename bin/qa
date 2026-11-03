@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Thin, dependency-free entry point. Keeps cron's PATH deterministic.
+set -euo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+export QA_SENTINELS_HOME="${QA_SENTINELS_HOME:-$ROOT}"
+exec python3 -m sentinels.cli "$@"

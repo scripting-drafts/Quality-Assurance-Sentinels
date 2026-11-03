@@ -1,0 +1,850 @@
+"""Command line entry point: qa <command>."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+
+from . import (
+    config, db, deep, detect, evidence, ingest, inventory, posture, report,
+    sampler, tickets, triage,
+)
+from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
+
+CRON_BEGIN = "# >>> qa-sentinels >>>"
+CRON_END = "# <<< qa-sentinels <<<"
+
+
+def _cron_block() -> str:
+    root = config.ROOT
+    qa = root / "bin" / "qa"
+    return "\n".join(
+        [
+            CRON_BEGIN,
+            f"* * * * * cd {root} && flock -n var/tick.lock ./bin/qa tick >>var/cron.log 2>&1",
+            f"7 8 * * * cd {root} && ./bin/qa report --kind daily >>var/cron.log 2>&1",
+            f"@reboot sleep 30 && cd {root} && ./bin/qa tick >>var/cron.log 2>&1",
+            CRON_END,
+        ]
+    )
+
+
+def cmd_init(args) -> int:
+    config.ensure_dirs()
+    db.init()
+    rc, out, err = run([str(config.SAMPLE_BIN)], timeout=30)
+    ok = rc == 0 and out.strip().startswith("{")
+    print(f"root      : {config.ROOT}")
+    print(f"database  : {config.DB_PATH}")
+    print(f"sampler   : {'ok' if ok else 'FAILED: ' + err.strip()[:200]}")
+    print(f"cron      : {'present' if shutil.which('crontab') else 'missing'}")
+    return 0 if ok else 1
+
+
+def cmd_sample(args) -> int:
+    with db.session() as conn:
+        data = sampler.take_sample(conn)
+        print(
+            json.dumps(
+                {
+                    "ts": data.get("ts"),
+                    "boot_id": data.get("boot_id"),
+                    "processes": len(data.get("procs", [])),
+                    "cpus": len(data.get("cpus", [])),
+                    "core2_logical": data.get("core2", {}).get("logical"),
+                    "mem_available_kb": data.get("mem", {}).get("MemAvailable"),
+                    "psi_cpu": data.get("psi", {}).get("cpu"),
+                },
+                indent=2,
+            )
+        )
+    return 0
+
+
+def cmd_ingest(args) -> int:
+    with db.session() as conn:
+        print(json.dumps(ingest.ingest_all(conn), indent=2))
+    return 0
+
+
+def _journal_inventory(conn, inv: dict) -> None:
+    from . import report as report_mod
+
+    diffs = inv.get("diffs") or []
+    body = [
+        f"- Run: {inv['run_id']} at {inv['ts']}",
+        f"- Trigger: {inv.get('reason', 'manual')}",
+        f"- Digest: `{inv['digest']}`",
+        f"- Items per layer: `{json.dumps(inv['counts'], sort_keys=True)}`",
+        f"- Changes: {len(diffs)}",
+        f"- Adaptive renewal: next run at `{inv.get('next_ts', 'n/a')}` "
+        f"(interval {fmt_duration(inv.get('interval_s', config.INVENTORY_INTERVAL_S))})",
+    ]
+    if diffs:
+        body += ["", "| layer | change | item |", "|---|---|---|"]
+        for _ts, _run, layer, change, item, _old, _new in diffs[:120]:
+            body.append(f"| {layer} | {change} | `{item}` |")
+        if len(diffs) > 120:
+            body.append(f"| … | … | {len(diffs) - 120} more changes in the database |")
+    report_mod.append_journal(
+        conn,
+        f"Inventory snapshot · run {inv['run_id']}",
+        "\n".join(body) + "\n",
+        "inventory",
+    )
+
+
+def cmd_inventory(args) -> int:
+    with db.session() as conn:
+        result = inventory.run_inventory(conn, reason="manual")
+        _journal_inventory(conn, result)
+        print(json.dumps({k: v for k, v in result.items() if k != "diffs"}, indent=2))
+        if result["diffs"]:
+            print(f"changes: {len(result['diffs'])} (recorded in the journal)")
+    return 0
+
+
+def cmd_report(args) -> int:
+    with db.session() as conn:
+        hours = args.hours or 24
+        result = report.write_report(conn, args.kind, hours)
+        if args.kind == "daily":
+            db.meta_set(conn, "last_daily_report_date", datetime.now().astimezone().strftime("%Y-%m-%d"))
+        print(result["path"])
+    return 0
+
+
+def cmd_evidence(args) -> int:
+    with db.session() as conn:
+        result = evidence.make_bundle(conn, reason=args.reason, hours=args.hours)
+        print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_verify(args) -> int:
+    result = evidence.verify_bundle(args.path)
+    print(json.dumps(result, indent=2))
+    return 0 if result.get("ok") else 1
+
+
+def cmd_tickets(args) -> int:
+    with db.session() as conn:
+        if args.list:
+            rows = conn.execute(
+                "SELECT ts, vendor, path, title FROM ticket_drafts ORDER BY id DESC"
+            ).fetchall()
+            for r in rows:
+                print(f"{r['ts']}  {r['vendor']:<18} {r['title']}")
+                print(f"    {r['path']}")
+            return 0
+        made = tickets.generate(conn, days=args.days, include_local=args.include_local)
+        generated = 0
+        for item in made:
+            print(f"[{item['vendor']}] {item['title']}")
+            print(f"    {item['path']}  ({item['count']} occurrences)")
+            generated += 1
+        if not generated:
+            print("no vendor clusters in the window; nothing drafted")
+    return 0
+
+
+def cmd_findings(args) -> int:
+    with db.session() as conn:
+        if args.set_status:
+            if args.id is None:
+                print("--set-status requires --id N", file=sys.stderr)
+                return 2
+            ok = detect.set_status(conn, args.id, args.set_status)
+            print("updated" if ok else "finding not found")
+            return 0 if ok else 1
+        rows = detect.list_findings(conn, limit=args.limit, status=args.only)
+        for row in rows:
+            print(
+                f"[{row['id']:>3}] {row['severity']:<8} {row['status']:<13} "
+                f"{row['rule']:<24} x{row['count']:<3} {row['subject']}  {row['ts']}"
+            )
+            print(f"      {row['detail'][:140]}")
+        if not rows:
+            print("no findings")
+    return 0
+
+
+def cmd_deep(args) -> int:
+    with db.session() as conn:
+        if args.consume:
+            results = deep.consume(
+                conn, duration=args.duration, dry_run=args.dry_run,
+                perf_record=args.perf_record,
+            )
+            print(json.dumps(results, indent=2))
+            return 0 if all(r.get("status") != "needs-root" for r in results) else 3
+
+        if args.list:
+            rows = conn.execute(
+                "SELECT id,ts,case_id,status,path,sha256 FROM deep_runs ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+            for row in rows:
+                print(f"[{row['id']:>3}] {row['ts']} case={row['case_id']} "
+                      f"{row['status']:<10} {row['path']}")
+            print(f"pending requests: {len(deep.pending_requests())}")
+            return 0
+
+        request = {
+            "id": utcnow().strftime("%Y%m%dT%H%M%S%f"),
+            "created": iso(),
+            "case_id": args.case,
+            "finding_id": args.finding,
+            "reason": args.reason,
+            "pid": args.pid,
+            "comm": args.comm,
+            "event_ts": args.since,
+            "duration_s": args.duration,
+            "perf_record": args.perf_record,
+        }
+        if args.case and not args.comm:
+            case = conn.execute(
+                "SELECT * FROM core2_cases WHERE id=?", (args.case,)
+            ).fetchone()
+            if case:
+                request["comm"] = case["process"]
+                request["event_ts"] = request["event_ts"] or case["event_ts"]
+
+        if args.enqueue:
+            path = deep.enqueue(
+                conn, case_id=args.case, finding_id=args.finding, reason=args.reason,
+                pid=args.pid, comm=request["comm"], ts=request["event_ts"],
+                duration=args.duration, perf_record=args.perf_record,
+            )
+            print(path)
+            return 0
+
+        priv = deep.privilege()
+        if not priv["ok"] and not args.dry_run:
+            path = deep.enqueue(
+                conn, case_id=args.case, finding_id=args.finding, reason=args.reason,
+                pid=args.pid, comm=request["comm"], ts=request["event_ts"],
+                duration=args.duration, perf_record=args.perf_record,
+            )
+            print(f"queued: {path}")
+            print(f"privilege: euid={priv['euid']} CapEff={priv['cap_eff']} "
+                  f"(need CAP_SYS_ADMIN + CAP_PERFMON)")
+            print("run one of:")
+            print(f"  sudo {config.BIN / 'qa'} deep --consume")
+            print(f"  bin/qa deploy-phase2   # installs the phase-2 path unit")
+            return 0
+
+        result = deep.run_request(
+            conn, request, duration=args.duration, dry_run=args.dry_run,
+            perf_record=args.perf_record,
+        )
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result.get("status") in ("complete", "dry-run") else 3
+
+
+def cmd_triage(args) -> int:
+    with db.session() as conn:
+        if args.set_status:
+            if args.case is None:
+                print("--set-status requires --case N", file=sys.stderr)
+                return 2
+            row = triage.set_status(conn, args.case, args.set_status, args.note)
+            if not row:
+                print(f"case {args.case} not found", file=sys.stderr)
+                return 1
+            print(f"case {row['id']}: {row['status']}")
+            return 0
+        if args.case is not None:
+            row = conn.execute("SELECT * FROM core2_cases WHERE id=?", (args.case,)).fetchone()
+            if not row:
+                print(f"case {args.case} not found", file=sys.stderr)
+                return 1
+            print((row["path"] and read_text(row["path"])) or "(case file missing)")
+            return 0
+        if not args.list:
+            print(json.dumps(triage.refresh(conn), indent=2))
+        summary = triage.summary(conn)
+        print(json.dumps(summary, indent=2))
+        for row in triage.cases(conn, status=args.only, limit=args.limit):
+            print(
+                f"[{row['id']:>3}] {row['verdict']:<10} {row['status']:<13} "
+                f"{row['process']:<22} {row['event_ts']}  {row['signature'][:80]}"
+            )
+        print(f"dossier: {config.TRIAGE_DIR / 'index.md'}")
+    return 0
+
+
+def cmd_posture(args) -> int:
+    with db.session() as conn:
+        data = posture.record(conn, force=True, rebaseline=args.rebaseline)
+    print(json.dumps(data, indent=2))
+    return 0 if data["verdict"] == "unprivileged" and not data["baseline_changed"] else 1
+
+
+def cmd_status(args) -> int:
+    with db.session() as conn:
+        def scalar(sql, args=()):
+            return conn.execute(sql, args).fetchone()[0]
+
+        samples = scalar("SELECT COUNT(*) FROM samples")
+        events = scalar("SELECT COUNT(*) FROM events")
+        critical = scalar("SELECT COUNT(*) FROM events WHERE severity='critical'")
+        crashes = scalar("SELECT COUNT(*) FROM crashes")
+        core2 = scalar("SELECT COUNT(*) FROM crashes WHERE core2_involved=1")
+        inv = conn.execute("SELECT * FROM inventory_runs ORDER BY id DESC LIMIT 1").fetchone()
+        bundles = scalar("SELECT COUNT(*) FROM bundles")
+        drafts = scalar("SELECT COUNT(*) FROM ticket_drafts")
+        chain_head = ""
+        chain = config.EVIDENCE_DIR / "chain.log"
+        if chain.exists():
+            lines = chain.read_text().strip().splitlines()
+            chain_head = lines[-1] if lines else ""
+
+        print("qa-sentinels status")
+        print(f"  last sample   : {db.meta_get(conn, 'last_sample_ts') or 'never'}")
+        print(f"  last ingest   : {db.meta_get(conn, 'last_journal_ingest') or 'never'}")
+        print(f"  last inventory: {db.meta_get(conn, 'last_inventory_ts') or 'never'}")
+        print(f"  database      : {samples} samples, {events} events, {crashes} crashes")
+        print(f"  critical      : {critical} events; core-2-correlated crashes: {core2}")
+        if inv:
+            print(f"  inventory     : run {inv['id']} at {inv['ts']} ({inv['counts']})")
+            print(
+                f"  next inventory: {db.meta_get(conn, 'next_inventory_ts') or 'n/a'} "
+                f"(interval {db.meta_get(conn, 'inventory_interval_s') or config.INVENTORY_INTERVAL_S}s)"
+            )
+        print(f"  evidence      : {bundles} bundles; chain head {chain_head[:90] or 'none'}")
+        print(f"  ticket drafts : {drafts} (never auto-submitted)")
+        tri = triage.summary(conn)
+        print(f"  core2 triage  : {tri['total']} cases {tri['by_status']} -> {config.TRIAGE_DIR}")
+        fcounts = conn.execute(
+            "SELECT severity, COUNT(*) n FROM findings WHERE status='open' GROUP BY severity"
+        ).fetchall()
+        fsum = ", ".join(f"{r['severity']}={r['n']}" for r in fcounts) or "none"
+        print(f"  phase1        : open findings: {fsum}")
+        drows = conn.execute(
+            "SELECT status, COUNT(*) n FROM deep_runs GROUP BY status"
+        ).fetchall()
+        dsum = ", ".join(f"{r['status']}={r['n']}" for r in drows) or "none"
+        p2 = _phase2_state()
+        print(
+            f"  phase2        : deep runs: {dsum}; "
+            f"pending requests: {len(deep.pending_requests())}; "
+            f"path unit: {'armed' if p2['deployed'] else 'not deployed'}"
+        )
+        ebpf_ok, ebpf_detail = _ebpf_state()
+        print(f"  eBPF          : {'built' if ebpf_ok else 'stale/missing'} ({ebpf_detail})")
+        print(f"  posture       : {posture.line()}")
+        print(f"  journal       : {config.JOURNAL_DIR}")
+    return 0
+
+
+def cmd_preflight(args) -> int:
+    checks = []
+    rc, out, err = run([str(config.SAMPLE_BIN)], timeout=30)
+    checks.append(("C sampler", rc == 0 and out.startswith("{"), (err or "")[:120]))
+    rc, out, err = run(["journalctl", "-n", "1", "--no-pager"], timeout=20)
+    checks.append(("journal read access", rc == 0, (err or "")[:120]))
+    rc, out, err = run(["coredumpctl", "list", "--no-pager", "--since=-1day"], timeout=30)
+    checks.append(("coredump access", rc == 0, (err or "")[:120]))
+    checks.append(("crontab", shutil.which("crontab") is not None, ""))
+    free = shutil.disk_usage(str(config.ROOT)).free
+    checks.append(("disk > 2 GiB free", free > 2 * 1024**3, f"{free / 1024**3:.1f} GiB"))
+    checks.append(
+        (
+            f"physical core {config.CORE2_PHYSICAL_ID} present",
+            bool(config.CORE2_CPUS),
+            f"logical CPUs {config.CORE2_CPUS}",
+        )
+    )
+    post = posture.collect()
+    checks.append(
+        (
+            "unprivileged posture",
+            post["verdict"] == "unprivileged" and not post["baseline_changed"],
+            ", ".join(post["reasons"] + [f"drift: {k}" for k in post["baseline_changed"]])
+            or "capabilities/sudo/root clean and baseline unchanged",
+        )
+    )
+    checks.append(("core2 triage dossier", config.TRIAGE_DIR.exists(), str(config.TRIAGE_DIR)))
+    failed = 0
+    for name, ok, detail in checks:
+        print(f"[{'ok' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail and not ok else ""))
+        failed += 0 if ok else 1
+    priv = deep.privilege()
+    state = _phase2_state()
+    if priv["ok"]:
+        phase2 = "ready"
+    elif state["deployed"]:
+        phase2 = "armed via qa-sentinel-deep.path (shell itself unprivileged)"
+    elif state["active"]:
+        phase2 = f"path unit is active but not for {config.ROOT}; run: bin/qa deploy-phase2 --force"
+    else:
+        phase2 = (
+            f"not privileged (euid={priv['euid']}, CapEff={priv['cap_eff']}); "
+            "arm with: bin/qa deploy-phase2"
+        )
+    print(f"[info] phase-2 tracing: {phase2}")
+    print(
+        "[info] eBPF tracer: "
+        + ("built" if (config.BIN / "qa_ebpf").exists() else
+           "not built; run root/ebpf/bootstrap-ebpf.sh then root/ebpf/build.sh")
+    )
+    return 1 if failed else 0
+
+
+DEEP_SERVICE_UNIT = pathlib.Path("/etc/systemd/system/qa-sentinel-deep.service")
+DEEP_PATH_UNIT = pathlib.Path("/etc/systemd/system/qa-sentinel-deep.path")
+
+
+def _phase2_state() -> dict:
+    root = config.ROOT
+    service = read_text(DEEP_SERVICE_UNIT)
+    path_unit = read_text(DEEP_PATH_UNIT)
+    installed = (
+        f"ExecStart={root}/bin/qa deep --consume" in service
+        and f"PathExistsGlob={root}/triage/core2/deep-requests/*.json" in path_unit
+    )
+    rc, out, _ = run(["systemctl", "is-active", "qa-sentinel-deep.path"], timeout=10)
+    active = rc == 0 and out.strip() == "active"
+    return {"installed": installed, "active": active, "deployed": installed and active}
+
+
+def _privilege_failure(stderr: str) -> bool:
+    text = stderr.lower()
+    return any(
+        marker in text
+        for marker in (
+            "password is required",
+            "a terminal is required",
+            "no tty present",
+            "not allowed",
+        )
+    )
+
+
+def _run_phase2_installer(user: str | None = None) -> tuple[int, str, str]:
+    cmd = [str(config.ROOT / "root" / "install-system.sh"), "--phase2-only"]
+    if user:
+        cmd += ["--user", user]
+    if os.geteuid() == 0:
+        return run(cmd, timeout=300)
+    if shutil.which("sudo"):
+        rc, out, err = run(["sudo", "-n", *cmd], timeout=300)
+        if rc == 0 or not _privilege_failure(err):
+            return rc, out, err
+    if sys.stdin.isatty():
+        return run(["sudo", *cmd], timeout=300)
+    if shutil.which("pkexec") and (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        return run(["pkexec", *cmd], timeout=600)
+    return 126, "", "no non-interactive privilege path; run as root or: sudo " + " ".join(cmd)
+
+
+def _ebpf_state() -> tuple[bool, str]:
+    binary = config.BIN / "qa_ebpf"
+    obj = config.BIN / "qa_trace.bpf.o"
+    if not binary.exists() or not obj.exists():
+        return False, "missing"
+    try:
+        stamp = json.loads(read_text(config.BIN / "qa_ebpf.build.json"))
+    except ValueError:
+        return False, "missing build stamp"
+    if stamp.get("kernel_release") != os.uname().release:
+        return False, f"built for {stamp.get('kernel_release', '?')}, host is {os.uname().release}"
+    if stamp.get("binary_sha256") != sha256_file(binary):
+        return False, "loader changed since build"
+    if stamp.get("object_sha256") != sha256_file(obj):
+        return False, "BPF object changed since build"
+    return True, "built for this kernel"
+
+
+def _ensure_ebpf(skip: bool) -> tuple[bool, str]:
+    current, detail = _ebpf_state()
+    if current:
+        return True, detail
+    if skip:
+        return False, f"{detail} (skipped)"
+    build = config.ROOT / "root" / "ebpf" / "build.sh"
+    rc, out, err = run([str(build)], timeout=600)
+    if rc == 0:
+        current, detail = _ebpf_state()
+        if current:
+            return True, detail
+    bootstrap = config.ROOT / "root" / "ebpf" / "bootstrap-ebpf.sh"
+    rc2, out2, err2 = run([str(bootstrap)], timeout=900)
+    if rc2 == 0:
+        rc3, out3, err3 = run([str(build)], timeout=600)
+        if rc3 == 0:
+            current, detail = _ebpf_state()
+            if current:
+                return True, detail
+        return False, (err3 or out3 or err or out).strip()[-300:]
+    return False, (err2 or out2 or err or out).strip()[-300:]
+
+
+def cmd_deploy_phase2(args) -> int:
+    if args.check:
+        state = _phase2_state()
+        ebpf, ebpf_detail = _ebpf_state()
+        print("phase 2 deployment")
+        print(
+            "  units     : "
+            + ("match this checkout" if state["installed"] else f"not installed for {config.ROOT}")
+        )
+        print(f"  path unit : {'active' if state['active'] else 'inactive'}")
+        print(f"  eBPF      : {'built' if ebpf else 'stale/missing'} ({ebpf_detail})")
+        print(f"  pending   : {len(deep.pending_requests())}")
+        return 0 if state["deployed"] else 1
+    ok, detail = _ensure_ebpf(args.skip_ebpf)
+    print(f"eBPF tracer: {'ok' if ok else 'unavailable'} ({detail})")
+    state = _phase2_state()
+    if state["deployed"] and not args.force:
+        print(f"phase 2 already deployed for {config.ROOT}")
+        print(f"path unit: active; pending requests: {len(deep.pending_requests())}")
+        return 0
+    print("installing phase-2 systemd path unit (privilege prompt may follow)...")
+    rc, out, err = _run_phase2_installer(args.user)
+    if out.strip():
+        print(out.strip())
+    if rc != 0:
+        if err.strip():
+            print(err.strip(), file=sys.stderr)
+        return rc
+    state = _phase2_state()
+    if not state["deployed"]:
+        print(
+            "installer finished but the path unit is not active; "
+            "check: systemctl status qa-sentinel-deep.path",
+            file=sys.stderr,
+        )
+        return 1
+    pending = len(deep.pending_requests())
+    print(f"phase 2 deployed and active for {config.ROOT}")
+    print(f"pending requests: {pending}")
+    return 0
+
+
+def cmd_install_cron(args) -> int:
+    config.ensure_dirs()
+    try:
+        cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        existing = cur.stdout if cur.returncode == 0 else ""
+    except FileNotFoundError:
+        print("crontab is not installed; use the systemd units or run `qa tick` from your scheduler")
+        return 1
+    lines = existing.splitlines()
+    if CRON_BEGIN in lines:
+        start = lines.index(CRON_BEGIN)
+        end = lines.index(CRON_END) if CRON_END in lines else len(lines) - 1
+        lines = lines[:start] + lines[end + 1 :]
+    text = "\n".join([ln for ln in lines if ln.strip()])
+    if args.remove:
+        text = (text + "\n" if text else "")
+        proc = subprocess.run(["crontab", "-"], input=text, text=True, capture_output=True)
+        if proc.returncode != 0:
+            print(f"failed to update crontab: {proc.stderr.strip()}")
+            return 1
+        print("removed qa-sentinels cron block")
+        return 0
+    text = (text + "\n\n" if text else "") + _cron_block() + "\n"
+    proc = subprocess.run(["crontab", "-"], input=text, text=True, capture_output=True)
+    if proc.returncode != 0:
+        print(f"failed to install crontab: {proc.stderr.strip()}")
+        return 1
+    print("installed cron block:")
+    print(_cron_block())
+    return 0
+
+
+def _ensure_delta_baseline(conn) -> None:
+    """Reports need two samples to turn raw counters into percentages."""
+    n = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+    if n == 1:
+        time.sleep(2)
+        try:
+            sampler.take_sample(conn)
+        except Exception:  # noqa: BLE001 - report can still render with n/a
+            pass
+
+
+def cmd_tick(args) -> int:
+    config.ensure_dirs()
+    result: dict = {"ts": iso()}
+    failed = 0
+    with db.session() as conn:
+        prev_boot = db.meta_get(conn, "last_boot_id")
+        try:
+            data = sampler.take_sample(conn)
+            result["sample"] = {
+                "boot_id": data.get("boot_id"),
+                "procs": len(data.get("procs", [])),
+            }
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            result["sample_error"] = str(exc)[:300]
+            db.record_run(conn, "tick/sample", False, str(exc))
+            data = None
+
+        try:
+            result["ingest"] = ingest.ingest_all(conn)
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            result["ingest_error"] = str(exc)[:300]
+            db.record_run(conn, "tick/ingest", False, str(exc))
+
+        due, why = inventory.is_due(conn)
+        if due:
+            try:
+                inv = inventory.run_inventory(conn, reason=why)
+                _journal_inventory(conn, inv)
+                result["inventory"] = {
+                    "run_id": inv["run_id"],
+                    "counts": inv["counts"],
+                    "diffs": len(inv["diffs"]),
+                    "reason": inv["reason"],
+                    "next": inv["next_ts"],
+                }
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["inventory_error"] = str(exc)[:300]
+                db.record_run(conn, "tick/inventory", False, str(exc))
+
+        boot = (data or {}).get("boot_id") or ""
+        startup_done_for = db.meta_get(conn, "startup_report_boot")
+        if boot and (prev_boot != boot or startup_done_for != boot):
+            try:
+                _ensure_delta_baseline(conn)
+                posture.record(conn, force=True)
+                triage.refresh(conn)
+                rep = report.write_report(conn, "startup", 24)
+                bun = evidence.make_bundle(conn, reason="startup", hours=24)
+                tickets.generate(conn, days=7)
+                result["startup_report"] = {"path": rep["path"], "bundle": bun["sha256"]}
+                db.meta_set(conn, "startup_report_boot", boot)
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["startup_error"] = str(exc)[:300]
+                db.record_run(conn, "tick/startup", False, str(exc))
+
+        # New crash or new critical event: seal evidence and refresh drafts now,
+        # not at the next daily report.
+        last_ticket = db.meta_get(conn, "last_ticket_run") or "1970-01-01T00:00:00Z"
+        new_crashes = conn.execute(
+            "SELECT COUNT(*) FROM crashes WHERE ts > ?", (last_ticket,)
+        ).fetchone()[0]
+        new_critical = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE ts > ? AND severity='critical'", (last_ticket,)
+        ).fetchone()[0]
+        if new_crashes or new_critical:
+            try:
+                if new_crashes:
+                    evidence.make_bundle(conn, reason="crash", hours=24)
+                made = tickets.generate(conn, days=7)
+                result["auto_tickets"] = {
+                    "crashes": new_crashes,
+                    "critical_events": new_critical,
+                    "drafts": len(made),
+                }
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["auto_ticket_error"] = str(exc)[:300]
+                db.record_run(conn, "tick/tickets", False, str(exc))
+
+        # Core-2 side queue: refresh after new evidence or at least every 10 min.
+        last_tri = db.meta_get(conn, "last_triage_run")
+        tri_age = (utcnow() - parse_iso(last_tri)).total_seconds() if last_tri else 1e9
+        if new_crashes or new_critical or tri_age >= 600:
+            try:
+                tri = triage.refresh(conn)
+                result["triage"] = tri
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["triage_error"] = str(exc)[:300]
+                db.record_run(conn, "tick/triage", False, str(exc))
+
+        # Phase 1 detection: turn new raw evidence into explicit findings and,
+        # when severe, queue phase-2 deep tracing and seal a phase-1 bundle.
+        try:
+            new_findings = detect.scan(conn)
+            if new_findings:
+                counts: dict[str, int] = {}
+                for finding in new_findings:
+                    counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
+                result["phase1_findings"] = {
+                    "new": len(new_findings), "by_severity": counts,
+                    "rules": [f["rule"] for f in new_findings][:20],
+                }
+                from . import report as report_mod
+
+                report_mod.append_journal(
+                    conn,
+                    f"Phase 1 findings: {len(new_findings)} new",
+                    "\n".join(
+                        f"- **{f['severity']}** `{f['rule']}` {f['subject']}: {f['detail'][:180]}"
+                        for f in new_findings[:20]
+                    ) + "\n",
+                    "phase1",
+                )
+
+                critical = [f for f in new_findings if f["severity"] == "critical"]
+                queued = detect.queue_escalations(conn, new_findings)
+                if queued:
+                    result["deep_queued"] = queued
+
+                last_bundle = db.meta_get(conn, "last_phase1_bundle")
+                b_age = (utcnow() - parse_iso(last_bundle)).total_seconds() if last_bundle else 1e9
+                if critical and b_age >= 180:
+                    bun = evidence.make_bundle(conn, reason="phase1-finding", hours=6)
+                    db.meta_set(conn, "last_phase1_bundle", iso())
+                    result["phase1_bundle"] = bun["sha256"]
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            result["phase1_error"] = str(exc)[:300]
+            db.record_run(conn, "tick/phase1", False, str(exc))
+
+        now_local = datetime.now().astimezone()
+        today = now_local.strftime("%Y-%m-%d")
+        if now_local.hour >= 8 and db.meta_get(conn, "last_daily_report_date") != today:
+            try:
+                _ensure_delta_baseline(conn)
+                rep = report.write_report(conn, "daily", 24)
+                tickets.generate(conn, days=7)
+                db.meta_set(conn, "last_daily_report_date", today)
+                result["daily_report"] = rep["path"]
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["daily_error"] = str(exc)[:300]
+                db.record_run(conn, "tick/daily", False, str(exc))
+
+        db.record_run(conn, "tick", failed == 0, json.dumps(result)[:1500])
+
+    print(json.dumps(result, indent=2))
+    return 1 if failed else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="qa",
+        description="Local QA sentinels for kernel, memory, CPU and process evidence.",
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("init", help="create directories/database and validate the sampler")
+    s.set_defaults(func=cmd_init)
+
+    s = sub.add_parser("tick", help="one scheduled pass: sample, ingest, inventory/report when due")
+    s.set_defaults(func=cmd_tick)
+
+    s = sub.add_parser("sample", help="take one kernel/memory/CPU sample")
+    s.set_defaults(func=cmd_sample)
+
+    s = sub.add_parser("ingest", help="ingest journal warnings/errors and crashes")
+    s.set_defaults(func=cmd_ingest)
+
+    s = sub.add_parser("inventory", help="snapshot every software layer")
+    s.set_defaults(func=cmd_inventory)
+
+    s = sub.add_parser("report", help="write a startup or daily report")
+    s.add_argument("--kind", choices=("startup", "daily"), default="daily")
+    s.add_argument("--hours", type=int, default=24)
+    s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("evidence", help="build a hash-chained evidence bundle")
+    s.add_argument("--reason", default="manual")
+    s.add_argument("--hours", type=int, default=24)
+    s.set_defaults(func=cmd_evidence)
+
+    s = sub.add_parser("verify", help="verify a bundle manifest and file hashes")
+    s.add_argument("path")
+    s.set_defaults(func=cmd_verify)
+
+    s = sub.add_parser("tickets", help="draft per-vendor tickets (never submits)")
+    s.add_argument("--days", type=int, default=7)
+    s.add_argument("--include-local", action="store_true")
+    s.add_argument("--list", action="store_true")
+    s.set_defaults(func=cmd_tickets)
+
+    s = sub.add_parser("status", help="show sentinel state")
+    s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("triage", help="core-2 side queue: refresh/list/update cases")
+    s.add_argument("--list", action="store_true", help="list without refreshing from sources")
+    s.add_argument("--case", type=int, help="show one case file")
+    s.add_argument("--set-status", choices=triage.STATUSES, help="update a case status")
+    s.add_argument("--note", help="note to store with the status change")
+    s.add_argument("--only", choices=triage.STATUSES, help="filter the listing")
+    s.add_argument("--limit", type=int, default=50)
+    s.set_defaults(func=cmd_triage)
+
+    s = sub.add_parser("posture", help="prove the sentinel has no root/capabilities/sudo")
+    s.add_argument("--rebaseline", action="store_true", help="reset the drift baseline after an intentional change")
+    s.set_defaults(func=cmd_posture)
+
+    s = sub.add_parser("phase1", help="alias for the real-time tick (detect + evidence)")
+    s.set_defaults(func=cmd_tick)
+
+    s = sub.add_parser("findings", help="list phase-1 findings and update their status")
+    s.add_argument("--limit", type=int, default=50)
+    s.add_argument("--only", choices=("open", "investigating", "resolved", "dismissed"))
+    s.add_argument("--id", type=int)
+    s.add_argument("--set-status", choices=("open", "investigating", "resolved", "dismissed"))
+    s.set_defaults(func=cmd_findings)
+
+    s = sub.add_parser("deep", help="phase 2: root-level tracefs/perf investigation")
+    s.add_argument("--consume", action="store_true", help="process queued requests (systemd path unit)")
+    s.add_argument("--list", action="store_true", help="list deep runs and pending requests")
+    s.add_argument("--case", type=int, help="triage case id")
+    s.add_argument("--finding", type=int, help="phase-1 finding id")
+    s.add_argument("--pid", type=int, help="process id to inspect")
+    s.add_argument("--comm", help="process name for context")
+    s.add_argument("--since", help="event timestamp (ISO) for the journal window")
+    s.add_argument("--reason", default="manual")
+    s.add_argument("--duration", type=int, default=config.DEEP_DURATION_S)
+    s.add_argument("--perf-record", action="store_true", help="also capture perf.data + report")
+    s.add_argument("--dry-run", action="store_true", help="collect what is allowed and list skips")
+    s.add_argument("--enqueue", action="store_true", help="queue only; do not execute")
+    s.set_defaults(func=cmd_deep)
+
+    s = sub.add_parser(
+        "preflight",
+        help="check sampler, journal, coredump, disk, core-2 and phase-2 prerequisites",
+    )
+    s.set_defaults(func=cmd_preflight)
+
+    s = sub.add_parser(
+        "deploy-phase2",
+        help="install/verify the per-host phase-2 path unit (idempotent)",
+    )
+    s.add_argument("--check", action="store_true", help="report deployment state only")
+    s.add_argument("--force", action="store_true", help="reinstall even if already active")
+    s.add_argument("--skip-ebpf", action="store_true", help="do not build the eBPF tracer")
+    s.add_argument("--user", help="operator account for the systemd unit (default: this user)")
+    s.set_defaults(func=cmd_deploy_phase2)
+
+    s = sub.add_parser("install-cron", help="install the user schedule (1 min tick, 08:00 daily)")
+    s.add_argument("--remove", action="store_true", help="remove the qa-sentinels cron block")
+    s.set_defaults(func=cmd_install_cron)
+
+    return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:  # noqa: BLE001
+        print(f"qa {args.command}: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

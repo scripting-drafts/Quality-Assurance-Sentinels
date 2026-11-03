@@ -671,7 +671,7 @@ class RaiseGateTests(unittest.TestCase):
             issue = self._issue()
             raised = root / "raise"
             with mock.patch.object(config, "RAISE_DIR", raised), \
-                 mock.patch.object(raise_ticket.tickets, "_collect_issues",
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
                                    return_value=[issue]), \
                  mock.patch.object(raise_ticket.report, "append_journal"):
                 result = raise_ticket.run(conn, notify_ready=False)
@@ -719,7 +719,7 @@ class RaiseGateTests(unittest.TestCase):
             marker.write_text("staged earlier\n")
             with mock.patch.object(config, "RAISE_DIR", raised), \
                  mock.patch.object(config, "STANDBY_DIR", standby), \
-                 mock.patch.object(raise_ticket.tickets, "_collect_issues",
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
                                    return_value=[issue]), \
                  mock.patch.object(raise_ticket.report, "append_journal"):
                 raise_ticket.run(conn, notify_ready=False)
@@ -759,7 +759,7 @@ class RaiseGateTests(unittest.TestCase):
             with mock.patch.object(config, "RAISE_DIR", raised), \
                  mock.patch.object(config, "STANDBY_DIR", standby), \
                  mock.patch.object(raise_ticket.report, "append_journal"), \
-                 mock.patch.object(raise_ticket.tickets, "_collect_issues",
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
                                    side_effect=[[issue], [], [issue]]):
                 first = raise_ticket.run(conn, notify_ready=False)
                 self.assertEqual(first["viable"], 1)
@@ -793,7 +793,7 @@ class RaiseGateTests(unittest.TestCase):
             (raised / "nvidia-gone-abc").mkdir(parents=True)
             with mock.patch.object(config, "RAISE_DIR", raised), \
                  mock.patch.object(config, "STANDBY_DIR", standby), \
-                 mock.patch.object(raise_ticket.tickets, "_collect_issues", return_value=[]), \
+                 mock.patch.object(raise_ticket.tickets, "collect_issues", return_value=[]), \
                  mock.patch.object(raise_ticket.report, "append_journal"):
                 raise_ticket.run(conn, notify_ready=False)
             index = (standby / "INDEX.md").read_text()
@@ -815,7 +815,7 @@ class RaiseGateTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.object(config, "DRAFT_DIR", pathlib.Path(tmp)), \
-             mock.patch.object(tickets, "_collect_issues", return_value=[issue]), \
+             mock.patch.object(tickets, "collect_issues", return_value=[issue]), \
              mock.patch.object(tickets, "_draft", return_value=("t", "b")), \
              mock.patch.object(raise_ticket, "run",
                                return_value={"viable": 1, "rejected": 0}) as run:
@@ -931,7 +931,7 @@ class NotificationTraceCrosscheckTests(unittest.TestCase):
             stale.write_text("old\n")
             with mock.patch.object(config, "DRAFT_DIR", d), \
                  mock.patch.object(config, "MAX_TICKETS", 10), \
-                 mock.patch.object(tickets, "_collect_issues", return_value=[]):
+                 mock.patch.object(tickets, "collect_issues", return_value=[]):
                 conn = self._conn()
                 tickets.generate(conn, days=1)
             self.assertTrue((d / "INDEX.md").exists())

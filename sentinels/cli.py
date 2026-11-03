@@ -30,7 +30,8 @@ def _cron_block() -> str:
             f"* * * * * cd {root} && flock -n var/tick.lock ./bin/qa tick >>var/cron.log 2>&1",
             f"7 8 * * * cd {root} && ./bin/qa report --kind daily >>var/cron.log 2>&1",
             f"@reboot sleep 30 && cd {root} && ./bin/qa tick >>var/cron.log 2>&1",
-            f"*/5 * * * * cd {root} && flock -n var/correlate.lock ./bin/qa correlate --drafts && ./bin/qa raise && ./bin/qa notify --drain >>var/cron.log 2>&1",
+            f"*/5 * * * * cd {root} && flock -n var/correlate.lock ./bin/qa correlate --drafts && ./bin/qa notify --drain >>var/cron.log 2>&1",
+            f"23 * * * * cd {root} && flock -n var/raise.lock ./bin/qa raise >>var/cron.log 2>&1",
             f"17 */6 * * * cd {root} && flock -n var/crosscheck.lock ./bin/qa crosscheck --deep --notify >>var/cron.log 2>&1",
             CRON_END,
         ]
@@ -383,6 +384,10 @@ def cmd_trace(args) -> int:
 
 def cmd_crosscheck(args) -> int:
     with db.session() as conn:
+        if args.history:
+            for row in crosscheck.history(conn, limit=args.limit):
+                print(f"{row['ts']}  checked={row['checked']}  drift={row['drift']}")
+            return 0
         result = crosscheck.run(
             conn, days=args.days, deep=args.deep, notify_drift=args.notify
         )
@@ -979,6 +984,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--days", type=int, default=30)
     s.add_argument("--deep", action="store_true", help="re-scan boots and rebuild correlations first")
     s.add_argument("--notify", action="store_true", help="pop a notification when drift is found")
+    s.add_argument("--history", action="store_true", help="list past cross-check runs")
+    s.add_argument("--limit", type=int, default=10)
     s.set_defaults(func=cmd_crosscheck)
 
     s = sub.add_parser("logs", help="live coloured sentinel log with timestamps")

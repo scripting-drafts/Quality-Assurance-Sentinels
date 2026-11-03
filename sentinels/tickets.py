@@ -94,7 +94,7 @@ def _repro_block(vendor: str) -> list[str]:
     ]
 
 
-def _collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dict]:
+def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dict]:
     since = (utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     crashes = [dict(r) for r in conn.execute(
         "SELECT * FROM crashes WHERE ts>=? ORDER BY ts DESC", (since,)
@@ -298,8 +298,12 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
     return title, "\n".join(lines) + "\n"
 
 
+# Deprecated shim: kept so out-of-tree callers do not break.
+_collect_issues = collect_issues
+
+
 def generate(conn, days: int = 7, include_local: bool = False, max_tickets: int | None = None) -> list[dict]:
-    issues = _collect_issues(conn, days, include_local)
+    issues = collect_issues(conn, days, include_local)
     cap = config.MAX_TICKETS if max_tickets is None else max_tickets
     selected = issues if cap <= 0 else issues[:cap]
     bundle_row = conn.execute(

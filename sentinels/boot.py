@@ -19,7 +19,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from .util import iso, run
+from .util import iso, read_text, run
 
 SHUTDOWN_RE = re.compile(r"systemd-shutdown\[\d+\]:")
 
@@ -108,6 +108,34 @@ def _scan_output(boot_id: str) -> str:
         return out
     # journalctl older than v237 has no --grep; bounded fallback
     return _journal(boot_id, n=20000, priority="warning")
+
+
+# ---------------------------------------------------------------- shared helpers
+def boot_info() -> dict:
+    """Current boot time and uptime, for reports."""
+    stat = read_text("/proc/stat")
+    match = re.search(r"^btime\s+(\d+)", stat, re.MULTILINE)
+    epoch = int(match.group(1)) if match else None
+    return {
+        "boot_epoch": epoch,
+        "boot_time": (
+            datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat() if epoch else "unknown"
+        ),
+        "uptime": read_text("/proc/uptime").split()[0] if read_text("/proc/uptime") else "?",
+    }
+
+
+def journal_tail(boot_ref: str, limit: int = 40, tail_only: bool = False
+                 ) -> tuple[int, list[str]]:
+    """Warning-or-worse lines for one boot. Count plus the last `limit` lines."""
+    cmd = ["journalctl", "-b", boot_ref, "--no-pager", "-p", "warning", "-o", "short-iso"]
+    if tail_only:
+        cmd += ["-n", str(limit)]
+    rc, out, err = run(cmd, timeout=60)
+    if rc != 0:
+        return 0, [f"(journal unavailable: {err.strip()[:160]})"]
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    return len(lines), lines[-limit:]
 
 
 # ---------------------------------------------------------------- host state

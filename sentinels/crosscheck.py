@@ -20,7 +20,7 @@ def run(conn, days: int = 30, deep: bool = False, notify_drift: bool = True) -> 
         boot.collect(conn, limit=12, refresh=True)
         correlate.correlate(conn, days=days, notify=False)
 
-    current = {issue["key"]: issue for issue in tickets._collect_issues(conn, days)}
+    current = {issue["key"]: issue for issue in tickets.collect_issues(conn, days)}
     drafts = [dict(r) for r in conn.execute("SELECT * FROM ticket_drafts ORDER BY ts")]
     draft_keys = {d["issue_key"] for d in drafts}
 

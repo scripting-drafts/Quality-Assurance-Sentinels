@@ -387,7 +387,7 @@ Viability: {verdict['score']}/{verdict['max_score']} checks passed.
 def run(conn, days: int = 30, min_count: int | None = None,
         notify_ready: bool = True) -> dict:
     config.RAISE_DIR.mkdir(parents=True, exist_ok=True)
-    issues = {i["key"]: i for i in tickets._collect_issues(conn, days)}
+    issues = {i["key"]: i for i in tickets.collect_issues(conn, days)}
     drafts = [dict(r) for r in conn.execute("SELECT * FROM ticket_drafts ORDER BY vendor, ts")]
     bundle_row = conn.execute("SELECT * FROM bundles ORDER BY id DESC LIMIT 1").fetchone()
     bundle = dict(bundle_row) if bundle_row else None

@@ -8,8 +8,6 @@ ROOT = pathlib.Path(os.environ.get("QA_SENTINELS_HOME", HOME / "qa-sentinels")).
 BIN = ROOT / "bin"
 VAR = ROOT / "var"
 DB_PATH = VAR / "sentinels.db"
-SAMPLE_JSONL = VAR / "samples.jsonl"
-LOCK_PATH = VAR / "tick.lock"
 
 JOURNAL_DIR = ROOT / "journal"
 REPORT_DIR = JOURNAL_DIR / "reports"
@@ -69,9 +67,6 @@ RAISE_MAX_AGE_DAYS = int(os.environ.get("QA_RAISE_MAX_AGE_DAYS", "30"))
 
 if JOURNAL_PRIORITY not in ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"):
     JOURNAL_PRIORITY = "warning"
-
-# log lines from these units are sentinel self-noise, never vendor evidence
-SELF_UNIT_PREFIXES = ("qa-sentinel",)
 
 # retention
 EVENT_RETENTION_DAYS = int(os.environ.get("QA_EVENT_RETENTION_DAYS", "30"))

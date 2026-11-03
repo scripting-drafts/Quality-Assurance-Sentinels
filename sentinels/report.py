@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from . import boot, config, db, deep, detect, posture, sampler, triage
-from .util import fmt_duration, human_bytes, iso, parse_iso, read_text, redact, run, sha256_text
+from . import boot, config, db, deep, detect, posture, triage
+from .util import fmt_duration, human_bytes, iso, parse_iso, read_text, redact
 
 SEV_ORDER = {"critical": 0, "error": 1, "warning": 2, "info": 3}
 
@@ -200,26 +199,14 @@ def _core2_section(conn, since_iso: str) -> str:
 
 
 # --------------------------------------------------------------- reports
+# Deprecated shims: the implementation lives in boot.py now.
 def _boot_info() -> dict:
-    btime = read_text("/proc/stat")
-    m = re.search(r"^btime\s+(\d+)", btime, re.MULTILINE)
-    epoch = int(m.group(1)) if m else None
-    return {
-        "boot_epoch": epoch,
-        "boot_time": datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat() if epoch else "unknown",
-        "uptime": read_text("/proc/uptime").split()[0] if read_text("/proc/uptime") else "?",
-    }
+    return boot.boot_info()
 
 
-def _boot_journal(boot: str, limit: int = 40, tail_only: bool = False) -> tuple[int, list[str]]:
-    cmd = ["journalctl", "-b", boot, "--no-pager", "-p", "warning", "-o", "short-iso"]
-    if tail_only:
-        cmd += ["-n", str(limit)]
-    rc, out, err = run(cmd, timeout=60)
-    if rc != 0:
-        return 0, [f"(journal unavailable: {err.strip()[:160]})"]
-    lines = [ln for ln in out.splitlines() if ln.strip()]
-    return len(lines), lines[-limit:]
+def _boot_journal(boot_ref: str, limit: int = 40, tail_only: bool = False
+                  ) -> tuple[int, list[str]]:
+    return boot.journal_tail(boot_ref, limit=limit, tail_only=tail_only)
 
 
 def _num(value, suffix: str = "", digits: int = 1) -> str:
@@ -294,7 +281,7 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
     ]
 
     if kind == "startup":
-        boot_info = _boot_info()
+        boot_info = boot.boot_info()
         body += [
             "",
             "## Boot",
@@ -322,8 +309,8 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
                 f"pstore {boundary.get('pstore')}, "
                 f"kexec_crash_loaded {boundary.get('kexec_loaded')}"
             )
-        prev_count, prev_lines = _boot_journal("-1")
-        _cur_count, cur_lines = _boot_journal("0", tail_only=True)
+        prev_count, prev_lines = boot.journal_tail("-1")
+        _cur_count, cur_lines = boot.journal_tail("0", tail_only=True)
         cur_flag = conn.execute(
             "SELECT severity, COALESCE(SUM(count),0) n FROM events WHERE ts>=? GROUP BY severity",
             (boot_info["boot_time"],),

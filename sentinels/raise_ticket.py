@@ -228,6 +228,7 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) ->
         "issue_key": issue["key"],
         "vendor": issue["vendor"],
         "signature": util.redact(issue["signature"]),
+        "display": util.redact(issue.get("display") or issue["signature"]),
         "kind": issue.get("kind"),
         "occurrences": issue.get("count"),
         "first": issue.get("first"),
@@ -256,6 +257,7 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) ->
         "archive": archive,
         "issue_key": issue["key"],
         "vendor": issue["vendor"],
+        "display": issue.get("display") or issue["signature"],
         "signature": issue["signature"][:120],
         "files": sorted(hashes),
         "manifest_sha256": hashes["evidence/manifest.json"],
@@ -467,7 +469,7 @@ def run(conn, days: int = 30, min_count: int | None = None,
         for item in by_vendor[vendor]:
             rel = item["directory"].split("/")[-1]
             index.append(
-                f"- [`{rel}`]({rel}/ticket.md) — {item['signature']} "
+                f"- [`{rel}`]({rel}/ticket.md) — {item.get('display') or item['signature']} "
                 f"({item['verdict']['score']}/{item['verdict']['max_score']} checks)"
             )
         index.append("")
@@ -485,7 +487,9 @@ def run(conn, days: int = 30, min_count: int | None = None,
         report.append_journal(
             conn,
             f"Raise gate: {len(raised)} viable, {len(rejected)} rejected",
-            "\n".join(f"- {r['vendor']}: {r['signature']}" for r in raised[:10]) + "\n",
+            "\n".join(
+                f"- {r['vendor']}: {r.get('display') or r['signature']}" for r in raised[:10]
+            ) + "\n",
             "raise",
         )
         if notify_ready:
@@ -497,7 +501,9 @@ def run(conn, days: int = 30, min_count: int | None = None,
             notify.enqueue(
                 conn, "raise", f"raise|{digest}",
                 f"{len(raised)} ticket(s) staged in raise/",
-                "\n".join(f"- {r['vendor']}: {r['signature']}" for r in raised[:6]),
+                "\n".join(
+                    f"- {r['vendor']}: {r.get('display') or r['signature']}" for r in raised[:6]
+                ),
                 detail=str(config.RAISE_DIR),
                 path=str(config.RAISE_DIR / "INDEX.md"),
             )

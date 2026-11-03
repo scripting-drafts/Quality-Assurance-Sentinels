@@ -616,6 +616,27 @@ class HeldPackageTests(unittest.TestCase):
         self.assertGreater(len({round(value, 6) for value in samples}), 1)
         self.assertEqual((config.LIVE_INTERVAL_MIN_S, config.LIVE_INTERVAL_MAX_S), (1.7, 2.0))
 
+    def test_titles_keep_raw_codes_while_grouping_stays_masked(self):
+        from unittest import mock
+        from sentinels import tickets
+
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO events(ts,boot_id,source,severity,unit,pid,comm,message,"
+            "fingerprint,raw,count,last_ts) VALUES(datetime('now'),'b','journal',"
+            "'critical','kernel',1,'k','logitech-hidpp-device 0003:046D:4023.0004: "
+            "hidpp_root_get_protocol_version: received protocol error 0x08',"
+            "'fp-display','{}',3,datetime('now'))"
+        )
+        issue = [i for i in tickets.collect_issues(conn, days=1)
+                 if "hidpp" in i["signature"]][0]
+        self.assertIn("0xADDR", issue["signature"])   # grouping stays stable
+        self.assertIn("0x08", issue["display"])       # humans see the real code
+        with mock.patch.object(tickets, "_environment", return_value=["- OS: test"]):
+            title, _body = tickets._draft(issue, None, {}, False)
+        self.assertIn("0x08", title)
+        self.assertNotIn("0xADDR", title)
+
     def test_live_view_iterates_every_section(self):
         from unittest import mock
         from sentinels import logs

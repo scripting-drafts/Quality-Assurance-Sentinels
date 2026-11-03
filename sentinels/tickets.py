@@ -101,6 +101,7 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
                 "key": key,
                 "vendor": vendor,
                 "signature": signature,
+                "display": _display_text(row, signature),
                 "kind": kind,
                 "rows": [],
                 "count": 0,
@@ -200,6 +201,27 @@ def _core2_conclusive(rows: list[dict]) -> bool:
     )
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _display_text(row: dict, fallback: str) -> str:
+    """Human-readable text for titles. The signature stays masked for grouping.
+
+    Masking (0x08 -> 0xADDR, numbers -> N) is right for deduplication and wrong
+    everywhere a person reads it: a vendor cannot search for 0xADDR, and
+    "PID:N" hides the pid that makes the report reproducible.
+    """
+    if row.get("sig"):
+        name = row.get("comm") or (row.get("exe") or "").rsplit("/", 1)[-1]
+        text = f"{name} {row['sig']}".strip()
+    else:
+        text = (row.get("message") or "").strip().splitlines()
+        text = text[0] if text else ""
+    text = _ANSI.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:200] or fallback
+
+
 def _affected_components(rows: list[dict]) -> list[str]:
     """Only the components the crash implicates, with versions.
 
@@ -241,7 +263,8 @@ def _affected_components(rows: list[dict]) -> list[str]:
 
 def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> tuple[str, str]:
     meta = classify.VENDOR_META.get(issue["vendor"], classify.VENDOR_META["local"])
-    title = f"[QA] {meta['component']}: {issue['signature'][:120]}"
+    shown = issue.get("display") or issue["signature"]
+    title = f"[QA] {meta['component']}: {shown[:120]}"
     rows = issue["rows"]
     example = ""
     if rows:

@@ -228,6 +228,29 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         "",
         *_environment(),
         "",
+    ]
+    if issue.get("kind") == "crash":
+        # a crash in a held, outdated module may already be fixed upstream
+        from . import holds as holdsmod
+
+        exe = next((r.get("exe") for r in rows if r.get("exe")), None)
+        hold = holdsmod.relevant(exe)
+        if hold.get("relevant") or hold.get("mass_hold"):
+            lines += ["## Held packages", ""]
+            if hold.get("mass_hold"):
+                lines.append(
+                    f"- **Global hold**: {hold['held_total']} packages held, "
+                    f"{hold['held_installed']} installed — upgrades are pinned system-wide"
+                )
+            for row in (hold.get("outdated") or [])[:10]:
+                lines.append(
+                    f"- Outdated and held: `{row['package']}` {row['installed']} "
+                    f"(candidate {row['candidate']})"
+                )
+            if not hold.get("outdated") and hold.get("relevant"):
+                lines.append("- Related packages are held but current.")
+            lines.append("")
+    lines += [
         "## What happens",
         "",
         f"A recurring {issue['kind']} cluster was observed by the local QA sentinel:",

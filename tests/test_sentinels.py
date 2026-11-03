@@ -451,6 +451,104 @@ class EscalationContextTests(unittest.TestCase):
         self.assertEqual(kwargs["package_owner"]["package"], "alpha")
 
 
+class HeldPackageTests(unittest.TestCase):
+    """A crash in a held, outdated module may already be fixed upstream."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def test_only_the_owner_family_is_matched_and_outdated_is_flagged(self):
+        from unittest import mock
+        from sentinels import holds, packages
+
+        holds.held.cache_clear()
+        holds._policies.cache_clear()
+        installed = (
+            ("nvidia-settings", "610.43.02"), ("nvidia-driver-550", "550.163.01"),
+            ("vim", "9.0"),
+        )
+        try:
+            with mock.patch.object(packages, "installed", return_value=installed), \
+                 mock.patch.object(packages, "owner",
+                                   return_value={"package": "nvidia-settings"}), \
+                 mock.patch.object(holds, "held", return_value=(
+                     "nvidia-settings", "nvidia-driver-550", "vim", "nvidia-driver-595")), \
+                 mock.patch.object(holds, "_policies", return_value={
+                     "nvidia-settings": {"installed": "610.43.02", "candidate": "615.71.10"},
+                     "nvidia-driver-550": {"installed": "550.163.01",
+                                           "candidate": "550.163.01"},
+                 }):
+                result = holds.relevant("/usr/bin/nvidia-settings")
+        finally:
+            holds.held.cache_clear()
+            holds._policies.cache_clear()
+        matched = {row["package"] for row in result["relevant"]}
+        self.assertIn("nvidia-settings", matched)
+        self.assertIn("nvidia-driver-550", matched)
+        self.assertNotIn("vim", matched)              # unrelated hold
+        self.assertNotIn("nvidia-driver-595", matched)  # not installed
+        self.assertEqual([r["package"] for r in result["outdated"]], ["nvidia-settings"])
+
+    def test_global_hold_is_flagged(self):
+        from unittest import mock
+        from sentinels import holds, packages
+
+        holds.held.cache_clear()
+        try:
+            with mock.patch.object(holds, "held",
+                                   return_value=tuple(f"p{i}" for i in range(1000))), \
+                 mock.patch.object(packages, "installed",
+                                   return_value=tuple((f"p{i}", "1") for i in range(100))):
+                result = holds.counts()
+        finally:
+            holds.held.cache_clear()
+        self.assertTrue(result["mass_hold"])
+        self.assertEqual(result["held_installed"], 100)
+
+    def test_crash_finding_names_the_held_outdated_package(self):
+        from unittest import mock
+        from sentinels import detect
+
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO crashes(ts,pid,comm,exe,sig,corefile,cpus_allowed,"
+            "core2_involved,context,fingerprint) VALUES(datetime('now'),7,'nvidia-settings',"
+            "'/usr/bin/nvidia-settings','SIGABRT','present','2,8',1,'ctx','fp-hold')"
+        )
+        hold = {"relevant": [], "mass_hold": False, "outdated": [
+            {"package": "nvidia-settings", "installed": "610.43.02",
+             "candidate": "615.71.10", "outdated": True},
+        ]}
+        with mock.patch.object(detect.holds, "relevant", return_value=hold):
+            findings = detect._crash_findings(conn, "2000-01-01T00:00:00Z")
+        self.assertIn("held-outdated", findings[0]["detail"])
+        self.assertIn("610.43.02->615.71.10", findings[0]["detail"])
+
+    def test_deep_request_records_held_packages(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, deep
+
+        conn = self._conn()
+        held = [{"package": "nvidia-settings", "installed": "610", "candidate": "615",
+                 "outdated": True}]
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config, "DEEP_REQUEST_DIR", pathlib.Path(tmp)):
+                path = deep.enqueue(conn, reason="auto:crash.core2", pid=1, comm="x",
+                                    held_packages=held, hold_summary={"mass_hold": False})
+                request = json.loads(pathlib.Path(path).read_text())
+        self.assertEqual(request["held_packages"], held)
+        self.assertEqual(request["hold_summary"]["mass_hold"], False)
+
+
 class InventoryCadenceTests(unittest.TestCase):
     def test_baseline_uses_base_interval(self):
         from sentinels import config

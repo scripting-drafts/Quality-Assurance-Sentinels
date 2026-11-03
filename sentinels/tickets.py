@@ -217,6 +217,9 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         exe = next((r.get("exe") for r in rows if r.get("exe")), None)
         pkg = pkgmod.context(exe)
         owner = pkg.get("owner") or {}
+        from . import holds as holdsmod
+
+        hold = holdsmod.relevant(exe)
         lines += [
             "## Installed packages",
             "",
@@ -229,6 +232,21 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
             "```",
             "",
         ]
+        if hold.get("relevant") or hold.get("mass_hold"):
+            lines += ["## Held packages", ""]
+            if hold.get("mass_hold"):
+                lines.append(
+                    f"- **Global hold**: {hold['held_total']} packages held, "
+                    f"{hold['held_installed']} installed — upgrades are pinned system-wide"
+                )
+            for row in (hold.get("outdated") or [])[:10]:
+                lines.append(
+                    f"- Outdated and held: `{row['package']}` {row['installed']} "
+                    f"(candidate {row['candidate']})"
+                )
+            if not hold.get("outdated") and hold.get("relevant"):
+                lines.append("- Related packages are held but current.")
+            lines.append("")
     lines += [
         "## What happens",
         "",

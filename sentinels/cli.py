@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 
 from . import (
-    boot, config, correlate, crosscheck, db, deep, detect, evidence, ingest, inventory,
+    boot, config, correlate, crosscheck, db, deep, detect, evidence, holds, ingest, inventory,
     logs, notify, posture, raise_ticket, report, sampler, tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
@@ -346,6 +346,14 @@ def cmd_correlate(args) -> int:
     return 0
 
 
+def cmd_holds(args) -> int:
+    if args.package:
+        print(json.dumps({"package": args.package, **holds.policy(args.package)}, indent=2))
+        return 0
+    print(json.dumps(holds.counts(), indent=2))
+    return 0
+
+
 def cmd_raise(args) -> int:
     with db.session() as conn:
         result = raise_ticket.run(
@@ -478,6 +486,9 @@ def cmd_status(args) -> int:
         staged = len([p for p in config.RAISE_DIR.iterdir() if p.is_dir()]) if config.RAISE_DIR.exists() else 0
         standby = len([p for p in config.STANDBY_DIR.iterdir() if p.is_dir()]) if config.STANDBY_DIR.exists() else 0
         print(f"  raise         : {staged} staged, {standby} in standby")
+        hc = holds.counts()
+        print(f"  holds         : {hc['held_total']} held, {hc['held_installed']} installed"
+              f"{' (GLOBAL HOLD)' if hc['mass_hold'] else ''}")
         print(f"  notify        : {nd} undelivered; crosscheck: "
               f"{cc['ts'] + ' drift=' + str(cc['drift']) if cc else 'never'}")
         drows = conn.execute(
@@ -963,6 +974,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="regenerate vendor drafts, including ready correlations")
     s.add_argument("--quiet", action="store_true", help="no journal entry")
     s.set_defaults(func=cmd_correlate)
+
+    s = sub.add_parser("holds", help="held packages and whether they are outdated")
+    s.add_argument("--package", help="show apt policy for one package")
+    s.set_defaults(func=cmd_holds)
 
     s = sub.add_parser("raise", help="stage viable tickets under raise/ with their evidence")
     s.add_argument("--days", type=int, default=30)

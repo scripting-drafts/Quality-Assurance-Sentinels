@@ -6,7 +6,7 @@ All commands use `./bin/qa <command>` from the repository root.
 | --- | --- | --- |
 | Setup and operations | `init`, `preflight`, `status`, `install-cron`, `posture` | Initialize, inspect prerequisites, check scheduling and security posture |
 | Routine collection | `tick` (`phase1`), `sample`, `ingest`, `inventory`, `report` | Capture and summarize system state |
-| Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace` | Examine restarts, events, and their relationships |
+| Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, events, their relationships, and held/outdated packages |
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |
 | Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports |
 | Deep diagnostics | `deploy-phase2`, `deep` | Configure and run queued tracing |

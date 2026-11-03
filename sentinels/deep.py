@@ -80,7 +80,8 @@ def privilege() -> dict:
 # --------------------------------------------------------------- requests
 def enqueue(conn, case_id=None, finding_id=None, reason="manual", pid=None,
             comm=None, ts=None, duration=None, perf_record=False,
-            packages=None, package_owner=None) -> str:
+            packages=None, package_owner=None,
+            held_packages=None, hold_summary=None) -> str:
     config.DEEP_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
     stamp = utcnow().strftime("%Y%m%dT%H%M%S%f")
     request = {
@@ -98,6 +99,9 @@ def enqueue(conn, case_id=None, finding_id=None, reason="manual", pid=None,
         "package_owner": package_owner or {},
         "package_count": len(packages or []),
         "packages": list(packages or []),
+        # a crash in a held, outdated module may already be fixed upstream
+        "held_packages": list(held_packages or []),
+        "hold_summary": hold_summary or {},
     }
     path = config.DEEP_REQUEST_DIR / f"{stamp}-case{case_id or 'na'}.json"
     write_json(path, request)

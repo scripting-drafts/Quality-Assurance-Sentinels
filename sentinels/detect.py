@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from . import boot, config, db, packages, triage
+from . import boot, config, db, holds, packages, triage
 from .util import iso, parse_iso, sha256_text, utcnow
 
 # journal rules, highest severity first
@@ -79,8 +79,18 @@ def _crash_findings(conn, since: str) -> list[dict]:
             rule, severity = "crash.affinity_unknown", "warning"
         else:
             continue
+        hold = holds.relevant(row["exe"])
+        held_note = ""
+        if hold["outdated"]:
+            held_note = "; held-outdated " + ", ".join(
+                f"{h['package']} {h['installed']}->{h['candidate']}"
+                for h in hold["outdated"][:3]
+            )
+        elif hold["mass_hold"]:
+            held_note = f"; global hold ({hold['held_total']} packages pinned)"
         out.append(
             {
+                "held": hold,
                 "fingerprint": "crash|" + (row["fingerprint"] or sha256_text(str(row))[:32]),
                 "ts": row["ts"],
                 "last_ts": row["ts"],
@@ -90,7 +100,7 @@ def _crash_findings(conn, since: str) -> list[dict]:
                 "pid": row["pid"],
                 "exe": row["exe"],
                 "detail": f"{row['sig']} affinity={row['cpus_allowed'] or 'unknown'} "
-                          f"core2={row['core2_involved']}",
+                          f"core2={row['core2_involved']}{held_note}",
                 "case_id": _case_id(conn, subject),
             }
         )
@@ -231,12 +241,14 @@ def queue_escalations(conn, findings: list[dict], cooldown_s: int | None = None)
         # a crash carries its pid, its moment and the packages installed then
         crash = finding["rule"].startswith("crash")
         pkg = packages.context(finding.get("exe")) if crash else {}
+        hold = finding.get("held") or {}
         queued.append(
             deep.enqueue(
                 conn, case_id=finding.get("case_id"), finding_id=finding["id"],
                 reason=f"auto:{finding['rule']}", comm=finding["subject"],
                 pid=finding.get("pid"), ts=finding.get("ts"),
                 packages=pkg.get("packages"), package_owner=pkg.get("owner"),
+                held_packages=hold.get("relevant"), hold_summary=hold or None,
             )
         )
         db.meta_set(conn, key, iso())

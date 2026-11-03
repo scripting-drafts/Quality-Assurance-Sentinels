@@ -12,8 +12,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from . import (
-    config, db, deep, detect, evidence, ingest, inventory, posture, report,
-    sampler, tickets, triage,
+    boot, config, correlate, crosscheck, db, deep, detect, evidence, ingest, inventory,
+    logs, notify, posture, raise_ticket, report, sampler, tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
 
@@ -30,6 +30,8 @@ def _cron_block() -> str:
             f"* * * * * cd {root} && flock -n var/tick.lock ./bin/qa tick >>var/cron.log 2>&1",
             f"7 8 * * * cd {root} && ./bin/qa report --kind daily >>var/cron.log 2>&1",
             f"@reboot sleep 30 && cd {root} && ./bin/qa tick >>var/cron.log 2>&1",
+            f"*/5 * * * * cd {root} && flock -n var/correlate.lock ./bin/qa correlate --drafts && ./bin/qa raise && ./bin/qa notify --drain >>var/cron.log 2>&1",
+            f"17 */6 * * * cd {root} && flock -n var/crosscheck.lock ./bin/qa crosscheck --deep --notify >>var/cron.log 2>&1",
             CRON_END,
         ]
     )
@@ -279,6 +281,134 @@ def cmd_triage(args) -> int:
     return 0
 
 
+def cmd_boots(args) -> int:
+    with db.session() as conn:
+        if args.detail:
+            row = conn.execute(
+                "SELECT * FROM boots WHERE boot_id LIKE ? ORDER BY last_ts DESC LIMIT 1",
+                (args.detail + "%",),
+            ).fetchone()
+            if not row:
+                print(f"no recorded boot matching {args.detail!r}")
+                return 1
+            row = dict(row)
+            print(f"boot {row['boot_id']}  ->  {boot.verdict(row)}")
+            print(f"  span       : {row['span']}")
+            print(f"  last entry : {row['last_ts']}")
+            print(f"  last msg   : {row['last_message']}")
+            print(f"  crashkernel: {row['crashkernel'] or 'none'}  "
+                  f"kexec_crash_loaded={row['kexec_loaded']}  vmcores={row['vmcores']}")
+            print(f"  pstore     : {row['pstore']}")
+            counts = boot.scan_counts(row)
+            for key, value in sorted(counts.items()):
+                print(f"  {key:<10} : {value['count']}")
+                for sample in value.get("sample", []):
+                    print(f"      {sample[:200]}")
+            return 0
+
+        fresh = boot.collect(conn, limit=args.limit, refresh=args.refresh)
+        if fresh["new"] or fresh["updated"]:
+            print(f"recorded {fresh['new']} new, refreshed {fresh['updated']} boot(s); "
+                  f"{len(fresh['unclean'])} unclean")
+        rows = boot.rows(conn, limit=args.limit)
+        if not rows:
+            print("no boots recorded yet")
+            return 0
+        print(f"{'boot':<10} {'verdict':<8} {'last entry':<20} last message")
+        for row in rows:
+            print(
+                f"{row['boot_id'][:8]:<10} {boot.verdict(row):<8} "
+                f"{(row['last_ts'] or '')[:19]:<20} {(row['last_message'] or '')[:70]}"
+            )
+    return 0
+
+
+def cmd_correlate(args) -> int:
+    with db.session() as conn:
+        summary = correlate.correlate(conn, days=args.days, notify=not args.quiet)
+        clusters = correlate.aggregate(conn, days=args.days)
+        if args.drafts:
+            drafts = tickets.generate(conn, days=args.days)
+            summary["drafts"] = len(drafts)
+        print(json.dumps(summary, indent=2))
+        if not clusters:
+            print("\nno component signature appeared in the death window of a silent stop")
+            return 0
+        print(f"\n{'vendor':<17} {'boots':>5} {'occ':>5} {'crash':>5} "
+              f"{'score':>9}  ready  signature")
+        for cluster in clusters[:20]:
+            print(
+                f"{cluster['vendor']:<17} {cluster['boots']:>5} {cluster['occurrences']:>5} "
+                f"{cluster['crashes']:>5} {cluster['score']:>4}/{cluster['threshold']:<4} "
+                f"{'yes' if cluster['ready'] else ' no':<6} {cluster['signature'][:70]}"
+            )
+    return 0
+
+
+def cmd_raise(args) -> int:
+    with db.session() as conn:
+        result = raise_ticket.run(
+            conn, days=args.days, min_count=args.min_count,
+            notify_ready=not args.no_notify,
+        )
+        print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_notify(args) -> int:
+    with db.session() as conn:
+        result = {}
+        if args.test:
+            ok, why = notify.send(
+                "QA sentinels", "Test notification from the sentinel", "normal"
+            )
+            result["test"] = {"ok": ok, "detail": why}
+        result.update(notify.collect(conn))
+        if args.drain:
+            result.update(notify.drain(conn))
+        else:
+            result["pending"] = notify.pending_count(conn)
+        conn.commit()
+        print(json.dumps(result, indent=2))
+        if result.get("test") and not result["test"]["ok"]:
+            return 1
+    return 0
+
+
+def cmd_trace(args) -> int:
+    with db.session() as conn:
+        print("\n".join(trace.render(conn, args.query, limit=args.limit)))
+    return 0
+
+
+def cmd_crosscheck(args) -> int:
+    with db.session() as conn:
+        result = crosscheck.run(
+            conn, days=args.days, deep=args.deep, notify_drift=args.notify
+        )
+        print(json.dumps(result, indent=2))
+    return 1 if result["drift"] else 0
+
+
+def cmd_logs(args) -> int:
+    if args.install_autostart:
+        print(json.dumps(logs.install_autostart(), indent=2))
+        return 0
+    color = (not args.no_color) and (args.force_color or logs.supports_color())
+    path = config.VAR / "cron.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+    with db.session() as conn:
+        for line in logs.header(conn):
+            print(line, flush=True)
+    if args.follow:
+        logs.follow(path, lines=args.lines, color=color)
+    else:
+        for line in logs.tail_lines(path, args.lines):
+            print(logs.format_line(line, color), flush=True)
+    return 0
+
+
 def cmd_posture(args) -> int:
     with db.session() as conn:
         data = posture.record(conn, force=True, rebaseline=args.rebaseline)
@@ -326,6 +456,25 @@ def cmd_status(args) -> int:
         ).fetchall()
         fsum = ", ".join(f"{r['severity']}={r['n']}" for r in fcounts) or "none"
         print(f"  phase1        : open findings: {fsum}")
+        bcounts = conn.execute(
+            "SELECT COUNT(*) n,"
+            " COALESCE(SUM(CASE WHEN ended_clean=0 THEN 1 ELSE 0 END),0) u FROM boots"
+        ).fetchone()
+        print(f"  boots         : {bcounts['n']} recorded, {bcounts['u']} unclean")
+        ccounts = conn.execute("SELECT COUNT(*) AS n FROM correlations").fetchone()
+        ready_clusters = sum(1 for c in correlate.aggregate(conn) if c["ready"])
+        print(f"  correlate     : {ccounts['n']} cluster rows, {ready_clusters} ticket-ready")
+        nd = conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE delivered=0"
+        ).fetchone()[0]
+        cc = conn.execute(
+            "SELECT ts, drift FROM crosschecks ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        staged = len([p for p in config.RAISE_DIR.iterdir() if p.is_dir()]) if config.RAISE_DIR.exists() else 0
+        standby = len([p for p in config.STANDBY_DIR.iterdir() if p.is_dir()]) if config.STANDBY_DIR.exists() else 0
+        print(f"  raise         : {staged} staged, {standby} in standby")
+        print(f"  notify        : {nd} undelivered; crosscheck: "
+              f"{cc['ts'] + ' drift=' + str(cc['drift']) if cc else 'never'}")
         drows = conn.execute(
             "SELECT status, COUNT(*) n FROM deep_runs GROUP BY status"
         ).fetchall()
@@ -598,6 +747,28 @@ def cmd_tick(args) -> int:
             result["ingest_error"] = str(exc)[:300]
             db.record_run(conn, "tick/ingest", False, str(exc))
 
+        # Boot boundary: classify the boots that ended since the last tick. This
+        # is the only layer that can see a hard reset, because it runs after it.
+        try:
+            boundary = boot.collect(conn)
+            result["boots"] = {k: boundary[k] for k in ("scanned", "new")}
+            if boundary["new"]:
+                unclean = [r for r in boundary["records"] if r["ended_clean"] == 0]
+                body = "\n".join(
+                    f"- **{boot.verdict(r)}** `{r['boot_id'][:8]}` "
+                    f"last entry {r['last_ts']} — {(r['last_message'] or '')[:160]}"
+                    for r in boundary["records"]
+                ) + "\n"
+                report.append_journal(
+                    conn, f"Boot boundary: {len(unclean)} unclean of {boundary['new']}",
+                    body, "boot",
+                )
+                result["boots"]["unclean"] = [r["boot_id"][:8] for r in unclean]
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            result["boot_error"] = str(exc)[:300]
+            db.record_run(conn, "tick/boot", False, str(exc))
+
         due, why = inventory.is_due(conn)
         if due:
             try:
@@ -615,9 +786,9 @@ def cmd_tick(args) -> int:
                 result["inventory_error"] = str(exc)[:300]
                 db.record_run(conn, "tick/inventory", False, str(exc))
 
-        boot = (data or {}).get("boot_id") or ""
+        current_boot = (data or {}).get("boot_id") or ""
         startup_done_for = db.meta_get(conn, "startup_report_boot")
-        if boot and (prev_boot != boot or startup_done_for != boot):
+        if current_boot and (prev_boot != current_boot or startup_done_for != current_boot):
             try:
                 _ensure_delta_baseline(conn)
                 posture.record(conn, force=True)
@@ -626,7 +797,7 @@ def cmd_tick(args) -> int:
                 bun = evidence.make_bundle(conn, reason="startup", hours=24)
                 tickets.generate(conn, days=7)
                 result["startup_report"] = {"path": rep["path"], "bundle": bun["sha256"]}
-                db.meta_set(conn, "startup_report_boot", boot)
+                db.meta_set(conn, "startup_report_boot", current_boot)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 result["startup_error"] = str(exc)[:300]
@@ -772,6 +943,52 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("status", help="show sentinel state")
     s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("boots", help="classify previous boots: clean shutdown vs silent stop")
+    s.add_argument("--limit", type=int, default=10)
+    s.add_argument("--detail", help="show one recorded boot by id prefix")
+    s.add_argument("--refresh", action="store_true", help="re-scan boots already recorded")
+    s.set_defaults(func=cmd_boots)
+
+    s = sub.add_parser(
+        "correlate", help="pair silent stops with the component errors that preceded them"
+    )
+    s.add_argument("--days", type=int, default=30)
+    s.add_argument("--drafts", action="store_true",
+                   help="regenerate vendor drafts, including ready correlations")
+    s.add_argument("--quiet", action="store_true", help="no journal entry")
+    s.set_defaults(func=cmd_correlate)
+
+    s = sub.add_parser("raise", help="stage viable tickets under raise/ with their evidence")
+    s.add_argument("--days", type=int, default=30)
+    s.add_argument("--min-count", type=int)
+    s.add_argument("--no-notify", action="store_true")
+    s.set_defaults(func=cmd_raise)
+
+    s = sub.add_parser("notify", help="queue and deliver desktop pop-ups for ready tickets")
+    s.add_argument("--drain", action="store_true", help="deliver queued notifications now")
+    s.add_argument("--test", action="store_true", help="send one test notification")
+    s.set_defaults(func=cmd_notify)
+
+    s = sub.add_parser("trace", help="follow a signature, boot or cluster across every layer")
+    s.add_argument("query", help="cluster key, boot id prefix, fingerprint, or message text")
+    s.add_argument("--limit", type=int, default=50)
+    s.set_defaults(func=cmd_trace)
+
+    s = sub.add_parser("crosscheck", help="re-verify drafts, verdicts and correlations")
+    s.add_argument("--days", type=int, default=30)
+    s.add_argument("--deep", action="store_true", help="re-scan boots and rebuild correlations first")
+    s.add_argument("--notify", action="store_true", help="pop a notification when drift is found")
+    s.set_defaults(func=cmd_crosscheck)
+
+    s = sub.add_parser("logs", help="live coloured sentinel log with timestamps")
+    s.add_argument("-f", "--follow", action="store_true")
+    s.add_argument("--lines", type=int, default=20)
+    s.add_argument("--no-color", action="store_true")
+    s.add_argument("--force-color", action="store_true")
+    s.add_argument("--install-autostart", action="store_true",
+                   help="open this monitor in a terminal at login")
+    s.set_defaults(func=cmd_logs)
 
     s = sub.add_parser("triage", help="core-2 side queue: refresh/list/update cases")
     s.add_argument("--list", action="store_true", help="list without refreshing from sources")

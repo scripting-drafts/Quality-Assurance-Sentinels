@@ -395,5 +395,660 @@ class InventoryCadenceTests(unittest.TestCase):
         self.assertLessEqual(next_interval(0, 3000), config.INVENTORY_MAX_S)
 
 
+class BootBoundaryTests(unittest.TestCase):
+    """A boot verdict decides whether a crash is even investigable."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def _boot(self, conn, boot_id="b1", clean=0, ts="2026-11-03T09:33:14Z"):
+        conn.execute(
+            "INSERT INTO boots(boot_id, seq, span, last_ts, ended_clean, markers,"
+            " last_message, scans, pstore, kexec_loaded, crashkernel, vmcores, captured_ts)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (boot_id, -1, "span", ts, clean, "", "last line", "{}",
+             "[]", 0, "", 0, ts),
+        )
+
+    def test_only_clean_boots_are_quiet(self):
+        from sentinels import boot
+
+        conn = self._conn()
+        self._boot(conn, "clean", clean=1)
+        self.assertEqual(boot.findings(conn, "2026-11-01T00:00:00Z"), [])
+        self.assertEqual(boot.verdict({"ended_clean": 1}), "CLEAN")
+        self.assertEqual(boot.verdict({"ended_clean": 0}), "UNCLEAN")
+        self.assertEqual(boot.verdict({"ended_clean": None}), "UNKNOWN")
+
+    def test_unclean_boot_becomes_one_critical_finding(self):
+        from sentinels import boot, detect
+
+        conn = self._conn()
+        self._boot(conn)
+        new = detect.scan(conn)
+        rules = [f["rule"] for f in new]
+        self.assertEqual(rules, ["boot.unclean"])
+        self.assertEqual(new[0]["severity"], "critical")
+        self.assertIn("b1", new[0]["fingerprint"])
+        # same boot never re-alerts
+        self.assertEqual(detect.scan(conn), [])
+
+    def test_classification_reads_shutdown_marker_only(self):
+        from unittest import mock
+        from sentinels import boot
+
+        record = {"index": -1, "boot_id": "abc", "span": "span"}
+        with mock.patch.object(boot, "_journal", return_value="line\nsystemd-shutdown[1]: done\n"), \
+             mock.patch.object(boot, "_last_epoch", return_value="2026-11-03T09:00:00Z"):
+            self.assertEqual(boot.scan_boot(record)["ended_clean"], 1)
+        with mock.patch.object(boot, "_journal", return_value="line\nlast nvidia line\n"), \
+             mock.patch.object(boot, "_last_epoch", return_value="2026-11-03T09:00:00Z"):
+            self.assertEqual(boot.scan_boot(record)["ended_clean"], 0)
+
+    def test_bug_pattern_does_not_match_xorg_noise(self):
+        import re
+        from sentinels import boot
+
+        panic = {key: pattern for key, _label, pattern in boot.SCANS}["panic"]
+        regex = re.compile(panic)
+        self.assertIsNone(regex.search("(EE) event16 - Mouse: client bug: lagging behind"))
+        self.assertIsNotNone(regex.search("kernel BUG at mm/slub.c:1"))
+
+
+class CorrelationTests(unittest.TestCase):
+    """Consistency is recurrence across stops, not volume inside one."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def _boot(self, conn, boot_id, last_ts):
+        conn.execute(
+            "INSERT INTO boots(boot_id, seq, span, last_ts, ended_clean, markers,"
+            " last_message, scans, pstore, kexec_loaded, crashkernel, vmcores, captured_ts)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (boot_id, -1, "span", last_ts, 0, "", "last line", "{}", "[]", 0, "", 0, last_ts),
+        )
+
+    def _event(self, conn, boot_id, ts, message, fingerprint, count=1, unit="kernel"):
+        conn.execute(
+            "INSERT INTO events(ts,boot_id,source,severity,unit,pid,comm,message,"
+            "fingerprint,raw,count,last_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ts, boot_id, "journal", "critical", unit, 1, "x", message, fingerprint,
+             "{}", count, ts),
+        )
+
+    def _stops(self, conn):
+        from datetime import timedelta
+        from sentinels.util import iso, utcnow
+
+        now = utcnow()
+        first = iso(now - timedelta(hours=6))
+        second = iso(now - timedelta(hours=2))
+        self._boot(conn, "bootA", first)
+        self._boot(conn, "bootB", second)
+        return first, second
+
+    def test_recurring_signature_across_stops_is_ready(self):
+        from datetime import timedelta
+        from sentinels import correlate
+        from sentinels.util import parse_iso
+
+        conn = self._conn()
+        first, second = self._stops(conn)
+        for i, stop in enumerate((first, second)):
+            ts = (parse_iso(stop) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._event(
+                conn, f"boot{'AB'[i]}", ts,
+                "NVRM: Xid (PCI:0000:01:00): 79, GPU has fallen off the bus",
+                f"fp{i}", count=2,
+            )
+        summary = correlate.correlate(conn, days=30, notify=False)
+        self.assertEqual(summary["unclean_boots"], 2)
+        ready = correlate.aggregate(conn, days=30)
+        nvidia = [c for c in ready if c["vendor"] == "nvidia" and c["ready"]]
+        self.assertTrue(nvidia, ready)
+        self.assertEqual(nvidia[0]["boots"], 2)
+        self.assertEqual(nvidia[0]["repeat_rate"], 1.0)
+
+    def test_single_stop_is_not_consistent_enough(self):
+        from datetime import timedelta
+        from sentinels import correlate
+        from sentinels.util import parse_iso
+
+        conn = self._conn()
+        first, _second = self._stops(conn)
+        conn.execute("DELETE FROM boots WHERE boot_id='bootB'")
+        ts = (parse_iso(first) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._event(conn, "bootA", ts, "NVRM: Xid 79", "fp", count=4)
+        correlate.correlate(conn, days=30, notify=False)
+        clusters = correlate.aggregate(conn, days=30)
+        self.assertTrue(clusters)
+        self.assertFalse(any(c["ready"] for c in clusters))
+
+    def test_events_outside_the_death_window_do_not_count(self):
+        from datetime import timedelta
+        from sentinels import correlate
+        from sentinels.util import parse_iso
+
+        conn = self._conn()
+        first, _second = self._stops(conn)
+        conn.execute("DELETE FROM boots WHERE boot_id='bootB'")
+        ts = (parse_iso(first) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._event(conn, "bootA", ts, "NVRM: Xid 79", "fp", count=9)
+        self.assertEqual(correlate.clusters_for_boot(
+            conn, dict(conn.execute("SELECT * FROM boots").fetchone())), [])
+
+    def test_unattributed_component_never_becomes_a_draft(self):
+        from datetime import timedelta
+        from sentinels import correlate
+        from sentinels.util import parse_iso
+
+        conn = self._conn()
+        first, second = self._stops(conn)
+        for i, stop in enumerate((first, second)):
+            ts = (parse_iso(stop) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._event(conn, f"boot{'AB'[i]}", ts,
+                        "something odd happened, no owner named", f"fp{i}", count=5,
+                        unit="mystery-widget")
+        correlate.correlate(conn, days=30, notify=False)
+        self.assertEqual(correlate.ticket_candidates(conn, days=30), [])
+
+    def test_candidate_carries_inferred_attribution_note(self):
+        from datetime import timedelta
+        from sentinels import correlate
+        from sentinels.util import parse_iso
+
+        conn = self._conn()
+        first, second = self._stops(conn)
+        for i, stop in enumerate((first, second)):
+            ts = (parse_iso(stop) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._event(conn, f"boot{'AB'[i]}", ts,
+                        "NVRM: Xid (PCI:0000:01:00): 79", f"fp{i}", count=2)
+        correlate.correlate(conn, days=30, notify=False)
+        candidates = correlate.ticket_candidates(conn, days=30)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["vendor"], "nvidia")
+        self.assertIn("inferred", candidates[0]["notes"])
+        self.assertEqual(candidates[0]["kind"], "correlation")
+
+
+class RaiseGateTests(unittest.TestCase):
+    """Only defensible tickets get staged, and each carries its own evidence."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def _issue(self, key="k1", vendor="nvidia", count=5, kind="event"):
+        from sentinels.util import iso
+
+        return {
+            "key": key, "vendor": vendor, "signature": "NVRM: Xid (PCI:0000:01:00): 79",
+            "kind": kind, "count": count,
+            "first": iso(), "last": iso(),
+            "rows": [{"ts": iso(), "message": "NVRM: Xid 79", "boot_id": "bootA",
+                      "severity": "critical"}],
+        }
+
+    def test_stale_draft_is_not_viable(self):
+        from sentinels import raise_ticket
+
+        conn = self._conn()
+        verdict = raise_ticket.assess(conn, {"issue_key": "gone", "vendor": "nvidia"}, None)
+        self.assertFalse(verdict["viable"])
+        self.assertIn("no current evidence", " ".join(verdict["reasons"]))
+
+    def test_volume_below_threshold_is_not_viable(self):
+        from sentinels import raise_ticket
+
+        conn = self._conn()
+        verdict = raise_ticket.assess(
+            conn, {"issue_key": "k1", "vendor": "nvidia"}, self._issue(count=1)
+        )
+        self.assertFalse(verdict["viable"])
+        self.assertIn("substantiated", [c["check"] for c in verdict["checks"] if not c["ok"]])
+
+    def test_environmental_failure_is_not_viable(self):
+        from sentinels import raise_ticket
+        from sentinels.util import iso
+
+        conn = self._conn()
+        issue = {
+            "key": "k1", "vendor": "mozilla",
+            "signature": "Failed to fetch https://ppa.launchpadcontent.net/x",
+            "kind": "event", "count": 9, "first": iso(), "last": iso(),
+            "rows": [{"ts": iso(), "message": "Failed to fetch https://x", "severity": "critical"}],
+        }
+        verdict = raise_ticket.assess(conn, {"issue_key": "k1", "vendor": "mozilla"}, issue)
+        self.assertFalse(verdict["viable"])
+        self.assertIn("actionable", [c["check"] for c in verdict["checks"] if not c["ok"]])
+
+    def test_unattributed_component_is_not_viable(self):
+        from sentinels import raise_ticket
+
+        conn = self._conn()
+        verdict = raise_ticket.assess(
+            conn, {"issue_key": "k1", "vendor": "local"}, self._issue(vendor="local")
+        )
+        self.assertFalse(verdict["viable"])
+
+    def test_viable_draft_is_staged_with_evidence_and_redaction(self):
+        import pathlib
+        import socket
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            draft_path = root / "draft.md"
+            draft_path.write_text(
+                f"# draft\nhost {socket.gethostname()} path {config.HOME}/x\n", encoding="utf-8"
+            )
+            conn.execute(
+                "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+                " VALUES(datetime('now'),'nvidia',?,?,'k1')",
+                (str(draft_path), "NVRM: Xid 79"),
+            )
+            issue = self._issue()
+            raised = root / "raise"
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(raise_ticket.tickets, "_collect_issues",
+                                   return_value=[issue]), \
+                 mock.patch.object(raise_ticket.report, "append_journal"):
+                result = raise_ticket.run(conn, notify_ready=False)
+            self.assertEqual(result["viable"], 1, result)
+            directory = pathlib.Path(result["staged"][0])
+            self.assertTrue((directory / "ticket.md").exists())
+            self.assertTrue((directory / "evidence" / "rows.json").exists())
+            self.assertTrue((directory / "evidence" / "trace.md").exists())
+            self.assertTrue((directory / "evidence" / "manifest.json").exists())
+            self.assertTrue((directory / "HOWTO.md").exists())
+            self.assertNotIn(socket.gethostname(), (directory / "ticket.md").read_text())
+            import json
+
+            manifest = json.loads((directory / "evidence" / "manifest.json").read_text())
+            self.assertEqual(manifest["issue_key"], "k1")
+            self.assertNotIn(str(config.HOME), (directory / "evidence" / "manifest.json").read_text())
+            import hashlib
+
+            digest = hashlib.sha256((directory / "ticket.md").read_bytes()).hexdigest()
+            self.assertEqual(manifest["evidence_files"]["ticket.md"], digest)
+            self.assertEqual(manifest["viability"]["score"], 5)
+
+    def test_staged_ticket_is_never_deleted_and_records_history(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            draft_path = root / "draft.md"
+            draft_path.write_text("# draft\n", encoding="utf-8")
+            conn.execute(
+                "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+                " VALUES(datetime('now'),'nvidia',?,?,'k1')",
+                (str(draft_path), "NVRM: Xid 79"),
+            )
+            issue = self._issue()
+            raised = root / "tickets" / "raise"
+            standby = root / "tickets" / "in-standby"
+            marker = raised / "nvidia-old-deadbeef" / "KEEP.txt"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("staged earlier\n")
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(raise_ticket.tickets, "_collect_issues",
+                                   return_value=[issue]), \
+                 mock.patch.object(raise_ticket.report, "append_journal"):
+                raise_ticket.run(conn, notify_ready=False)
+                first = raise_ticket.run(conn, notify_ready=False)
+            # nothing is deleted: the non-viable directory is parked in standby
+            self.assertFalse(marker.exists())
+            self.assertTrue((standby / "nvidia-old-deadbeef" / "KEEP.txt").exists())
+            self.assertEqual(first["viable"], 1)
+            directory = pathlib.Path(first["staged"][0])
+            history = directory / "evidence" / "history.jsonl"
+            self.assertTrue(history.exists())
+            lines = [ln for ln in history.read_text().splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1)  # identical re-run stays quiet
+            self.assertIn("state", json.loads(lines[0]))
+            manifest = json.loads((directory / "evidence" / "manifest.json").read_text())
+            self.assertIn("last_checked", manifest)
+
+    def test_ticket_returns_to_raise_when_viable_again(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            draft_path = root / "draft.md"
+            draft_path.write_text("# draft\n", encoding="utf-8")
+            conn.execute(
+                "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+                " VALUES(datetime('now'),'nvidia',?,?,'k1')",
+                (str(draft_path), "NVRM: Xid 79"),
+            )
+            raised, standby = root / "raise", root / "standby"
+            issue = self._issue()
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(raise_ticket.report, "append_journal"), \
+                 mock.patch.object(raise_ticket.tickets, "_collect_issues",
+                                   side_effect=[[issue], [], [issue]]):
+                first = raise_ticket.run(conn, notify_ready=False)
+                self.assertEqual(first["viable"], 1)
+                name = pathlib.Path(first["staged"][0]).name
+                second = raise_ticket.run(conn, notify_ready=False)
+                self.assertEqual(second["viable"], 0)
+                self.assertFalse((raised / name).exists())
+                self.assertTrue((standby / name).exists())
+                third = raise_ticket.run(conn, notify_ready=False)
+                self.assertEqual(third["viable"], 1)
+                self.assertTrue((raised / name).exists())
+                self.assertFalse((standby / name).exists())
+                self.assertEqual(third["reactivated"], [name])
+            events = [
+                json.loads(line)["event"]
+                for line in (raised / name / "evidence" / "standby.jsonl")
+                .read_text().splitlines() if line.strip()
+            ]
+            self.assertEqual(events, ["standby", "reactivated"])
+
+    def test_standby_index_lists_parked_tickets(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            raised, standby = root / "raise", root / "standby"
+            (raised / "nvidia-gone-abc").mkdir(parents=True)
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(raise_ticket.tickets, "_collect_issues", return_value=[]), \
+                 mock.patch.object(raise_ticket.report, "append_journal"):
+                raise_ticket.run(conn, notify_ready=False)
+            index = (standby / "INDEX.md").read_text()
+            self.assertIn("nvidia-gone-abc", index)
+            self.assertIn("kept for traceability", index)
+
+    def test_new_draft_set_triggers_triage_once(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket, tickets
+        from sentinels.util import iso
+
+        conn = self._conn()
+        issue = {
+            "key": "k1", "vendor": "nvidia", "signature": "NVRM: Xid 79",
+            "kind": "event", "count": 5, "first": iso(), "last": iso(),
+            "rows": [{"ts": iso(), "message": "m", "severity": "critical"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(config, "DRAFT_DIR", pathlib.Path(tmp)), \
+             mock.patch.object(tickets, "_collect_issues", return_value=[issue]), \
+             mock.patch.object(tickets, "_draft", return_value=("t", "b")), \
+             mock.patch.object(raise_ticket, "run",
+                               return_value={"viable": 1, "rejected": 0}) as run:
+            tickets.generate(conn, days=1)
+            self.assertEqual(run.call_count, 1)
+            tickets.generate(conn, days=1)
+            self.assertEqual(run.call_count, 1)  # same draft set, no second triage
+
+
+class NotificationTraceCrosscheckTests(unittest.TestCase):
+    """The parts that decide whether a human is ever told, and whether the
+    record can still be defended later."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def test_notification_queue_dedupes_per_key(self):
+        from sentinels import notify
+
+        conn = self._conn()
+        self.assertTrue(notify.enqueue(conn, "draft", "draft|k1", "t", "b"))
+        self.assertFalse(notify.enqueue(conn, "draft", "draft|k1", "t", "b"))
+        self.assertEqual(notify.pending_count(conn), 1)
+
+    def test_drain_marks_delivered_only_on_success(self):
+        from unittest import mock
+        from sentinels import notify
+
+        conn = self._conn()
+        notify.enqueue(conn, "draft", "k1", "t", "b")
+        with mock.patch.object(notify, "send", return_value=(False, "no session")):
+            result = notify.drain(conn)
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(notify.pending_count(conn), 1)
+        with mock.patch.object(notify, "send", return_value=(True, "sent")):
+            result = notify.drain(conn)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(notify.pending_count(conn), 0)
+
+    def test_drafts_are_batched_into_one_digest(self):
+        from sentinels import notify
+
+        conn = self._conn()
+        for i, vendor in enumerate(("nvidia", "canonical-kernel", "nvidia")):
+            conn.execute(
+                "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+                " VALUES(datetime('now'),?,?,?,?)",
+                (vendor, f"/tmp/d{i}.md", f"title {i}", f"key{i}"),
+            )
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config, "DRAFT_DIR", pathlib.Path(tmp)):
+                notify.collect(conn)
+                self.assertEqual(notify.pending_count(conn), 1)
+                notify.collect(conn)  # identical draft set must not re-notify
+                self.assertEqual(notify.pending_count(conn), 1)
+                row = notify.pending(conn)[0]
+                self.assertTrue(row["path"].endswith("INDEX.md"))
+                self.assertTrue(pathlib.Path(row["path"]).exists())
+
+    def test_click_opens_the_markdown_it_refers_to(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import notify
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "draft.md"
+            target.write_text("# draft\n")
+            with mock.patch.object(notify.subprocess, "Popen") as popen:
+                ok, detail = notify.open_target(str(target))
+            self.assertTrue(ok)
+            argv = popen.call_args.args[0]
+            self.assertIn("xdg-open", argv[0])
+            self.assertEqual(argv[-1], str(target))
+
+    def test_send_uses_click_helper_only_when_a_path_is_given(self):
+        from unittest import mock
+        from sentinels import notify
+
+        with mock.patch.object(notify, "available", return_value=(True, "ok")), \
+             mock.patch.object(notify, "_gi_available", return_value=True), \
+             mock.patch.object(notify, "_spawn_click_helper", return_value=True) as spawn, \
+             mock.patch.object(notify, "_plain_send", return_value=(True, "sent")) as plain:
+            ok, _ = notify.send("t", "b", path="/tmp/x.md")
+            self.assertTrue(ok)
+            spawn.assert_called_once()
+            plain.assert_not_called()
+            ok, _ = notify.send("t", "b")
+            self.assertTrue(ok)
+            plain.assert_called_once()
+
+    def test_draft_regeneration_keeps_the_index_page(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, tickets
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = pathlib.Path(tmp)
+            (d / "INDEX.md").write_text("# index\n")
+            stale = d / "stale-draft.md"
+            stale.write_text("old\n")
+            with mock.patch.object(config, "DRAFT_DIR", d), \
+                 mock.patch.object(config, "MAX_TICKETS", 10), \
+                 mock.patch.object(tickets, "_collect_issues", return_value=[]):
+                conn = self._conn()
+                tickets.generate(conn, days=1)
+            self.assertTrue((d / "INDEX.md").exists())
+            self.assertFalse(stale.exists())
+
+    def test_correlation_report_is_written_as_markdown(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, notify
+
+        cluster = {
+            "key": "abc123", "vendor": "nvidia", "signature": "NVRM: Xid 79",
+            "boots": 2, "total_unclean": 3, "occurrences": 5, "crashes": 1,
+            "score": 11, "threshold": 9, "ready": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config, "REPORT_DIR", pathlib.Path(tmp)):
+                path = notify._correlation_report(self._conn(), cluster)
+            self.assertTrue(path.endswith("correlation-abc123.md"))
+            text = pathlib.Path(path).read_text()
+            self.assertIn("NVRM: Xid 79", text)
+            self.assertIn("Attribution is inferred", text)
+
+    def test_missing_markdown_is_reported_not_invented(self):
+        from sentinels import notify
+
+        ok, detail = notify.open_target("/tmp/definitely-not-here-qa.md")
+        self.assertFalse(ok)
+        self.assertIn("missing target", detail)
+
+    def test_trace_finds_event_boot_and_draft_by_one_query(self):
+        from sentinels import trace
+
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO boots(boot_id,seq,span,last_ts,ended_clean,markers,last_message,"
+            "scans,pstore,kexec_loaded,crashkernel,vmcores,captured_ts)"
+            " VALUES('bootrace',-1,'s','2026-11-03T08:33:14Z',0,'','end','{}','[]',0,'',0,'x')"
+        )
+        conn.execute(
+            "INSERT INTO events(ts,boot_id,source,severity,unit,pid,comm,message,"
+            "fingerprint,raw,count,last_ts) VALUES('2026-11-03T08:33:00Z','bootrace',"
+            "'journal','critical','kernel',1,'k','NVRM: Xid 79 bootrace','fp-race','{}',2,"
+            "'2026-11-03T08:33:00Z')"
+        )
+        record = trace.resolve(conn, "bootrace")
+        self.assertTrue(record["events"])
+        self.assertTrue(record["boots"])
+        rendered = "\n".join(trace.render(conn, "bootrace"))
+        self.assertIn("Silent stops", rendered)
+        self.assertIn("Events sharing the signature", rendered)
+
+    def test_trace_reports_absence_instead_of_inventing(self):
+        from sentinels import trace
+
+        conn = self._conn()
+        self.assertEqual(trace.render(conn, "nothing-here"), ["nothing recorded for 'nothing-here'"])
+
+    def test_crosscheck_flags_a_draft_the_evidence_no_longer_backs(self):
+        from unittest import mock
+        from sentinels import crosscheck
+
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+            " VALUES('2026-11-03T00:00:00Z','nvidia','/tmp/x.md','gone','deadbeef')"
+        )
+        with mock.patch.object(crosscheck.report, "append_journal"):
+            result = crosscheck.run(conn, days=30, notify_drift=False)
+        self.assertIn("deadbeef", result["stale_drafts"])
+        self.assertGreater(result["drift"], 0)
+
+    def test_crosscheck_flags_reproducible_issue_without_draft(self):
+        from unittest import mock
+        from sentinels import crosscheck
+
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO events(ts,boot_id,source,severity,unit,pid,comm,message,"
+            "fingerprint,raw,count,last_ts) VALUES(datetime('now'),'b','journal',"
+            "'critical','kernel',1,'k','NVRM: Xid (PCI:0000:01:00): 79','fp-cc','{}',3,"
+            "datetime('now'))"
+        )
+        with mock.patch.object(crosscheck.report, "append_journal"):
+            result = crosscheck.run(conn, days=30, notify_drift=False)
+        self.assertTrue(result["unraised_issues"])
+
+    def test_log_line_gets_timestamp_and_severity_colour(self):
+        from sentinels import logs
+
+        plain = logs.format_line("boots: 1 unclean", color=False, stamp="12:00:00")
+        self.assertTrue(plain.startswith("[12:00:00]"))
+        coloured = logs.format_line("kernel panic - not syncing", color=True, stamp="12:00:00")
+        self.assertIn(logs.COLORS["critical"], coloured)
+        self.assertEqual(logs.classify_line("Kernel panic"), "critical")
+        self.assertEqual(logs.classify_line("service failed to start"), "error")
+        self.assertEqual(logs.classify_line("warning: retry"), "warning")
+
+    def test_colour_is_optional_for_pipes(self):
+        import os
+        from sentinels import logs
+
+        class FakeTTY:
+            def isatty(self):
+                return True
+
+        saved = os.environ.pop("NO_COLOR", None)
+        try:
+            self.assertTrue(logs.supports_color(stream=FakeTTY()))
+            os.environ["NO_COLOR"] = "1"
+            self.assertFalse(logs.supports_color(stream=FakeTTY()))
+        finally:
+            os.environ.pop("NO_COLOR", None)
+            if saved is not None:
+                os.environ["NO_COLOR"] = saved
+
+
 if __name__ == "__main__":
     unittest.main()

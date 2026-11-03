@@ -25,3 +25,6 @@ __pycache__/
 # Editors / OS
 .DS_Store
 *.swp
+
+# Generated per-host launcher (contains the absolute checkout path)
+bin/qa-logs-terminal

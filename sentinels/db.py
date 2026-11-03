@@ -64,6 +64,56 @@ CREATE TABLE IF NOT EXISTS crashes (
     fingerprint TEXT UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_crashes_ts ON crashes(ts);
+CREATE TABLE IF NOT EXISTS boots (
+    id INTEGER PRIMARY KEY,
+    boot_id TEXT NOT NULL UNIQUE,
+    seq INTEGER,
+    span TEXT,
+    last_ts TEXT,
+    ended_clean INTEGER,
+    markers TEXT,
+    last_message TEXT,
+    scans TEXT,
+    pstore TEXT,
+    kexec_loaded INTEGER,
+    crashkernel TEXT,
+    vmcores INTEGER,
+    captured_ts TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_boots_last ON boots(last_ts);
+CREATE TABLE IF NOT EXISTS correlations (
+    id INTEGER PRIMARY KEY,
+    boot_id TEXT NOT NULL,
+    vendor TEXT NOT NULL,
+    component TEXT,
+    signature TEXT NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 0,
+    crashes INTEGER NOT NULL DEFAULT 0,
+    window_start TEXT,
+    window_end TEXT,
+    created TEXT,
+    UNIQUE(boot_id, vendor, signature)
+);
+CREATE INDEX IF NOT EXISTS idx_corr_sig ON correlations(vendor, signature);
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    kind TEXT,
+    key TEXT NOT NULL UNIQUE,
+    title TEXT,
+    body TEXT,
+    delivered INTEGER NOT NULL DEFAULT 0,
+    detail TEXT,
+    path TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notify_pending ON notifications(delivered, ts);
+CREATE TABLE IF NOT EXISTS crosschecks (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    checked INTEGER NOT NULL DEFAULT 0,
+    drift INTEGER NOT NULL DEFAULT 0,
+    detail TEXT
+);
 CREATE TABLE IF NOT EXISTS inventory_runs (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -186,6 +236,9 @@ def init() -> None:
             conn.execute("ALTER TABLE events ADD COLUMN count INTEGER NOT NULL DEFAULT 1")
         if "last_ts" not in cols:
             conn.execute("ALTER TABLE events ADD COLUMN last_ts TEXT")
+        ncols = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
+        if ncols and "path" not in ncols:
+            conn.execute("ALTER TABLE notifications ADD COLUMN path TEXT")
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version','1')")
 
 

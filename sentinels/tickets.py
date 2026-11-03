@@ -9,7 +9,7 @@ import os
 import re
 from datetime import timedelta
 
-from . import classify, config, db
+from . import classify, config, correlate, db
 from .util import (
     human_bytes, identity_for_ticket, iso, read_text, redact, run, sha256_text, utcnow,
 )
@@ -169,6 +169,9 @@ def _collect_issues(conn, days: int = 7, include_local: bool = False) -> list[di
         if (include_local or i["vendor"] != "local")
         and classify.ticketworthy(i["signature"], i["kind"], i["severity"], i["count"])
     ]
+    # silent stops correlated with a recurring component signature: the one path
+    # where a ticket has no single log line to point at, only a convergence.
+    result.extend(correlate.ticket_candidates(conn, days))
     result.sort(
         key=lambda i: (
             i["kind"] != "correlation",
@@ -233,6 +236,10 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         redact(example)[:3000] or "(no message captured)",
         "```",
         "",
+    ]
+    if issue.get("notes"):
+        lines += ["## Consistency", "", issue["notes"], ""]
+    lines += [
         "## Physical core 2 correlation (required, do not omit)",
         "",
         *_core2_table(rows),
@@ -319,7 +326,31 @@ def generate(conn, days: int = 7, include_local: bool = False, max_tickets: int 
         )
         made.append({"vendor": vendor, "title": title, "path": str(path), "count": issue["count"]})
     for old in config.DRAFT_DIR.glob("*.md"):
+        if old.name == "INDEX.md":  # generated digest target, not a draft
+            continue
         if str(old) not in keep:
             old.unlink(missing_ok=True)
     db.meta_set(conn, "last_ticket_run", iso())
+    _triage_new_tickets(conn, selected)
     return made
+
+
+def _triage_new_tickets(conn, issues: list[dict]) -> None:
+    """Run the viability gate as soon as the draft set changes.
+
+    Drafts are generated on a schedule, but a ticket that appears should be
+    triaged in the same pass that created it, not up to five minutes later.
+    """
+    keys = {i["key"] for i in issues}
+    seen = set(filter(None, (db.meta_get(conn, "triaged_draft_keys") or "").split(",")))
+    if not keys or keys == seen:
+        return
+    from . import raise_ticket  # lazy: raise_ticket imports this module
+
+    try:
+        result = raise_ticket.run(conn)
+        db.meta_set(conn, "triaged_draft_keys", ",".join(sorted(keys)))
+        db.record_run(conn, "tickets/raise", True,
+                      f"viable={result['viable']} rejected={result['rejected']}")
+    except Exception as exc:  # noqa: BLE001 - triage must never block drafts
+        db.record_run(conn, "tickets/raise", False, str(exc)[:300])

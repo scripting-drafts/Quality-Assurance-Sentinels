@@ -16,6 +16,8 @@ REPORT_DIR = JOURNAL_DIR / "reports"
 EVIDENCE_DIR = ROOT / "evidence"
 TICKET_DIR = ROOT / "tickets"
 DRAFT_DIR = TICKET_DIR / "drafts"
+RAISE_DIR = TICKET_DIR / "raise"
+STANDBY_DIR = TICKET_DIR / "in-standby"
 TRIAGE_DIR = ROOT / "triage" / "core2"
 DEEP_DIR = TRIAGE_DIR / "deep"
 DEEP_REQUEST_DIR = TRIAGE_DIR / "deep-requests"
@@ -51,6 +53,21 @@ MAX_TICKETS = int(os.environ.get("QA_MAX_TICKETS", "10"))       # 0 = no cap
 EVIDENCE_EVENT_LIMIT = int(os.environ.get("QA_EVIDENCE_EVENT_LIMIT", "5000"))  # 0 = all
 MIN_FREE_MIB = int(os.environ.get("QA_MIN_FREE_MIB", "1024"))
 
+# silent-stop correlation: how the final window of an unclean boot is linked to
+# the events that preceded it, and when the pattern is strong enough to draft a
+# vendor ticket. "Consistency" means the same component signature recurs across
+# separate silent stops, not merely that it is frequent inside one.
+CORRELATE_WINDOW_S = int(os.environ.get("QA_CORRELATE_WINDOW_S", "1800"))
+CORRELATE_MIN_BOOTS = int(os.environ.get("QA_CORRELATE_MIN_BOOTS", "2"))
+CORRELATE_MIN_COUNT = int(os.environ.get("QA_CORRELATE_MIN_COUNT", "3"))
+CORRELATE_SINGLE_BOOT_MIN = int(os.environ.get("QA_CORRELATE_SINGLE_BOOT_MIN", "5"))
+
+# viability gate for /raise: what must be true before a draft becomes a ticket
+# a human is expected to actually post.
+RAISE_MIN_COUNT = int(os.environ.get("QA_RAISE_MIN_COUNT", "3"))
+RAISE_MAX_AGE_DAYS = int(os.environ.get("QA_RAISE_MAX_AGE_DAYS", "30"))
+RAISE_KEEP_DIRS = int(os.environ.get("QA_RAISE_KEEP_DIRS", "50"))
+
 if JOURNAL_PRIORITY not in ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"):
     JOURNAL_PRIORITY = "warning"
 
@@ -68,5 +85,6 @@ def ensure_dirs() -> None:
     for d in (
         VAR, JOURNAL_DIR, REPORT_DIR, EVIDENCE_DIR, TICKET_DIR, DRAFT_DIR,
         TRIAGE_DIR, DEEP_DIR, DEEP_REQUEST_DIR, DEEP_ARCHIVE_DIR, CONFIG_DIR,
+        RAISE_DIR, STANDBY_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)

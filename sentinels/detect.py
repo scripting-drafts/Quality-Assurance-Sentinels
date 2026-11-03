@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from . import config, db, triage
+from . import boot, config, db, triage
 from .util import iso, parse_iso, sha256_text, utcnow
 
 # journal rules, highest severity first
@@ -193,7 +193,12 @@ def scan(conn, hours: int = 24) -> list[dict]:
         if last
         else (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     )
-    candidates = _crash_findings(conn, since) + _event_findings(conn, since) + _sample_findings(conn)
+    candidates = (
+        _crash_findings(conn, since)
+        + _event_findings(conn, since)
+        + _sample_findings(conn)
+        + boot.findings(conn, since)
+    )
     new = []
     for finding in candidates:
         created = _upsert(conn, finding)
@@ -211,6 +216,9 @@ def queue_escalations(conn, findings: list[dict], cooldown_s: int | None = None)
     queued = []
     for finding in findings:
         if finding["severity"] != "critical" or not config.DEEP_AUTO:
+            continue
+        # phase 2 traces a live process; a boot that already ended cannot be traced
+        if finding["rule"].startswith("boot."):
             continue
         key = "deep_req|" + finding["fingerprint"]
         last_req = db.meta_get(conn, key)

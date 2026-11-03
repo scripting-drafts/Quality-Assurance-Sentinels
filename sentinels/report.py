@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from . import config, db, deep, detect, posture, sampler, triage
+from . import boot, config, db, deep, detect, posture, sampler, triage
 from .util import fmt_duration, human_bytes, iso, parse_iso, read_text, redact, run, sha256_text
 
 SEV_ORDER = {"critical": 0, "error": 1, "warning": 2, "info": 3}
@@ -294,18 +294,39 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
     ]
 
     if kind == "startup":
-        boot = _boot_info()
+        boot_info = _boot_info()
         body += [
             "",
             "## Boot",
             "",
-            f"- Current boot: `{boot['boot_time']}` (uptime {boot['uptime']} s)",
+            f"- Current boot: `{boot_info['boot_time']}` (uptime {boot_info['uptime']} s)",
         ]
+        boundary = boot.latest(conn)
+        if boundary:
+            line = (
+                f"- Previous boot boundary: **{boot.verdict(boundary)}** "
+                f"(`{boundary['boot_id'][:8]}`, last entry {boundary['last_ts']})"
+            )
+            if boundary.get("ended_clean") == 0:
+                line += (
+                    " — the journal ends without `systemd-shutdown`, so the machine "
+                    "stopped before a shutdown sequence began"
+                )
+            body.append(line)
+            counts = boot.scan_counts(boundary)
+            hits = ", ".join(
+                f"{v['label']} {v['count']}" for v in counts.values() if v.get("count")
+            )
+            body.append(
+                f"- Boot evidence: {hits or 'no failure signatures'}; "
+                f"pstore {boundary.get('pstore')}, "
+                f"kexec_crash_loaded {boundary.get('kexec_loaded')}"
+            )
         prev_count, prev_lines = _boot_journal("-1")
         _cur_count, cur_lines = _boot_journal("0", tail_only=True)
         cur_flag = conn.execute(
             "SELECT severity, COALESCE(SUM(count),0) n FROM events WHERE ts>=? GROUP BY severity",
-            (boot["boot_time"],),
+            (boot_info["boot_time"],),
         ).fetchall()
         cur_total = sum(int(r["n"]) for r in cur_flag)
         cur_detail = ", ".join(f"{r['severity']} {r['n']}" for r in cur_flag) or "none"

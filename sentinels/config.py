@@ -65,6 +65,10 @@ CORRELATE_SINGLE_BOOT_MIN = int(os.environ.get("QA_CORRELATE_SINGLE_BOOT_MIN", "
 RAISE_MIN_COUNT = int(os.environ.get("QA_RAISE_MIN_COUNT", "3"))
 RAISE_MAX_AGE_DAYS = int(os.environ.get("QA_RAISE_MAX_AGE_DAYS", "30"))
 
+# live view refresh: randomised so the dashboard is not a metronome
+LIVE_INTERVAL_MIN_S = float(os.environ.get("QA_LIVE_MIN_S", "1.7"))
+LIVE_INTERVAL_MAX_S = float(os.environ.get("QA_LIVE_MAX_S", "2.0"))
+
 if JOURNAL_PRIORITY not in ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"):
     JOURNAL_PRIORITY = "warning"
 

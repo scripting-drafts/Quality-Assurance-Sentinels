@@ -607,6 +607,16 @@ class HeldPackageTests(unittest.TestCase):
         self.assertIn("Physical core 2 correlation", body)
         self.assertIn("| `2,8` | yes |", body)
 
+    def test_live_delay_is_random_within_bounds(self):
+        from sentinels import config, logs
+
+        samples = [logs.next_delay() for _ in range(300)]
+        self.assertTrue(all(config.LIVE_INTERVAL_MIN_S <= value <= config.LIVE_INTERVAL_MAX_S
+                            for value in samples))
+        self.assertGreater(len({round(value, 6) for value in samples}), 1)
+        self.assertGreaterEqual(config.LIVE_INTERVAL_MIN_S, 1.7)
+        self.assertLessEqual(config.LIVE_INTERVAL_MAX_S, 2.0)
+
     def test_live_view_iterates_every_section(self):
         from unittest import mock
         from sentinels import logs

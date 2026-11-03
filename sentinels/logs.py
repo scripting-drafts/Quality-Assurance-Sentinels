@@ -10,6 +10,7 @@ through cron stays plain text.
 from __future__ import annotations
 
 import os
+import random
 import re
 import sys
 import time
@@ -177,7 +178,16 @@ def _live_sections(conn, path, lines: int) -> list[tuple[str, list[str]]]:
     return sections
 
 
-def live(path, lines: int = 10, color: bool = True, interval: int = 5) -> None:
+def next_delay() -> float:
+    """Refresh gap: random within the configured bounds, never a fixed beat."""
+    low = config.LIVE_INTERVAL_MIN_S
+    high = config.LIVE_INTERVAL_MAX_S
+    if high < low:
+        low, high = high, low
+    return random.uniform(low, high)
+
+
+def live(path, lines: int = 10, color: bool = True) -> None:
     """Iterate the sections, redrawing in place until interrupted."""
     from . import db
 
@@ -200,7 +210,7 @@ def live(path, lines: int = 10, color: bool = True, interval: int = 5) -> None:
             if not color:
                 print("[live] non-interactive output: rendered once")
                 return
-            time.sleep(max(1, interval))
+            time.sleep(next_delay())
     except KeyboardInterrupt:
         print("\n[live] stopped", flush=True)
 

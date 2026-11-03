@@ -16,8 +16,7 @@ different cadence and must not slow the sampler down.
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from . import classify, config, db, report
 from .util import iso, parse_iso, sha256_text, utcnow

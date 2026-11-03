@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 
-from . import config, db
+from . import config
 from .util import iso, sha256_text
 
 APP = "qa-sentinels"

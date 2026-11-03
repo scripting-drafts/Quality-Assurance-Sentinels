@@ -66,7 +66,6 @@ CORRELATE_SINGLE_BOOT_MIN = int(os.environ.get("QA_CORRELATE_SINGLE_BOOT_MIN", "
 # a human is expected to actually post.
 RAISE_MIN_COUNT = int(os.environ.get("QA_RAISE_MIN_COUNT", "3"))
 RAISE_MAX_AGE_DAYS = int(os.environ.get("QA_RAISE_MAX_AGE_DAYS", "30"))
-RAISE_KEEP_DIRS = int(os.environ.get("QA_RAISE_KEEP_DIRS", "50"))
 
 if JOURNAL_PRIORITY not in ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"):
     JOURNAL_PRIORITY = "warning"

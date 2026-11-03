@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 from . import (
     boot, config, correlate, crosscheck, db, deep, detect, evidence, ingest, inventory,

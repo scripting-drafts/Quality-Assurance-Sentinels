@@ -9,7 +9,7 @@ event fingerprint, or a phrase from a message all land on the same record set.
 """
 from __future__ import annotations
 
-from . import boot, correlate, util
+from . import boot
 
 
 def _like(query: str) -> str:

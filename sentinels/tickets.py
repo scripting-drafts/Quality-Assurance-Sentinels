@@ -9,7 +9,7 @@ import os
 import re
 from datetime import timedelta
 
-from . import classify, config, correlate, db
+from . import classify, config, correlate, db, holds, packages
 from .util import (
     human_bytes, identity_for_ticket, iso, read_text, redact, run, sha256_text, utcnow,
 )
@@ -190,6 +190,45 @@ def _core2_table(rows: list[dict]) -> list[str]:
     return lines
 
 
+def _affected_components(rows: list[dict]) -> list[str]:
+    """Only the components the crash implicates, with versions.
+
+    A full package inventory is noise in a vendor ticket. The owning build and
+    any held-outdated module in the same family are the parts a maintainer can
+    actually act on.
+    """
+    exe = next((r.get("exe") for r in rows if r.get("exe")), None)
+    owner = packages.owner(exe)
+    if not owner.get("package"):
+        return []
+    name = owner["package"]
+    version = owner.get("version") or "unknown"
+    policy = holds.policy(name)
+    on_hold = name in holds.held()
+    line = f"- `{name}` {version}"
+    if exe:
+        line += f" — owning package of `{exe}`"
+    if on_hold and policy.get("candidate") and policy["candidate"] != version:
+        line += f" (held; candidate {policy['candidate']})"
+    elif on_hold:
+        line += " (held at current version)"
+    lines = [line]
+
+    related = holds.relevant(exe)
+    for row in (related.get("outdated") or [])[:8]:
+        if row["package"] == name:
+            continue
+        lines.append(
+            f"- `{row['package']}` {row['installed']} — held; candidate {row['candidate']}"
+        )
+    if related.get("mass_hold"):
+        lines.append(
+            f"- Note: {related['held_total']} packages are held system-wide "
+            f"({related['held_installed']} installed), so upgrades are pinned"
+        )
+    return lines
+
+
 def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> tuple[str, str]:
     meta = classify.VENDOR_META.get(issue["vendor"], classify.VENDOR_META["local"])
     title = f"[QA] {meta['component']}: {issue['signature'][:120]}"
@@ -211,42 +250,9 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         "",
     ]
     if issue.get("kind") == "crash":
-        # vendors need the exact build, not just "Ubuntu 22.04"
-        from . import packages as pkgmod
-
-        exe = next((r.get("exe") for r in rows if r.get("exe")), None)
-        pkg = pkgmod.context(exe)
-        owner = pkg.get("owner") or {}
-        from . import holds as holdsmod
-
-        hold = holdsmod.relevant(exe)
-        lines += [
-            "## Installed packages",
-            "",
-            f"- Owning package: `{owner.get('package', 'unknown')}` "
-            f"{owner.get('version', '')}".rstrip(),
-            f"- Package inventory at draft time: **{pkg['count']}** packages",
-            "",
-            "```",
-            *(pkg["packages"] or ["(package list unavailable)"]),
-            "```",
-            "",
-        ]
-        if hold.get("relevant") or hold.get("mass_hold"):
-            lines += ["## Held packages", ""]
-            if hold.get("mass_hold"):
-                lines.append(
-                    f"- **Global hold**: {hold['held_total']} packages held, "
-                    f"{hold['held_installed']} installed — upgrades are pinned system-wide"
-                )
-            for row in (hold.get("outdated") or [])[:10]:
-                lines.append(
-                    f"- Outdated and held: `{row['package']}` {row['installed']} "
-                    f"(candidate {row['candidate']})"
-                )
-            if not hold.get("outdated") and hold.get("relevant"):
-                lines.append("- Related packages are held but current.")
-            lines.append("")
+        components = _affected_components(rows)
+        if components:
+            lines += ["## Affected Components", "", *components, ""]
     lines += [
         "## What happens",
         "",

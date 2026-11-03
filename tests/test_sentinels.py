@@ -530,6 +530,50 @@ class HeldPackageTests(unittest.TestCase):
         self.assertIn("held-outdated", findings[0]["detail"])
         self.assertIn("610.43.02->615.71.10", findings[0]["detail"])
 
+    def test_crash_draft_lists_affected_components_without_a_package_dump(self):
+        from unittest import mock
+        from sentinels import tickets
+
+        rows = [{
+            "ts": "2026-11-03T00:00:00Z", "comm": "nvidia-settings",
+            "exe": "/usr/bin/nvidia-settings", "sig": "SIGABRT",
+            "cpus_allowed": "2,8", "core2_involved": 1,
+        }]
+        issue = {
+            "key": "k", "vendor": "nvidia", "signature": "nvidia-settings SIGABRT",
+            "kind": "crash", "count": 1, "first": "2026-11-03T00:00:00Z",
+            "last": "2026-11-03T00:00:00Z", "rows": rows,
+        }
+        related = {"outdated": [], "mass_hold": False, "relevant": [],
+                   "held_total": 1, "held_installed": 1}
+        with mock.patch.object(tickets, "_environment", return_value=["- OS: test"]), \
+             mock.patch.object(tickets.packages, "owner",
+                               return_value={"package": "nvidia-settings",
+                                             "version": "610.43.02"}), \
+             mock.patch.object(tickets.holds, "held", return_value=("nvidia-settings",)), \
+             mock.patch.object(tickets.holds, "policy",
+                               return_value={"installed": "610.43.02",
+                                             "candidate": "615.71.10"}), \
+             mock.patch.object(tickets.holds, "relevant", return_value=related):
+            _title, body = tickets._draft(issue, None, {}, False)
+        self.assertIn("## Affected Components", body)
+        self.assertIn("`nvidia-settings` 610.43.02", body)
+        self.assertIn("candidate 615.71.10", body)
+        self.assertNotIn("## Installed packages", body)
+
+    def test_unresolved_component_gets_no_affected_section(self):
+        from unittest import mock
+        from sentinels import tickets
+
+        issue = {
+            "key": "k", "vendor": "systemd", "signature": "unit failed",
+            "kind": "event", "count": 3, "first": "2026-11-03T00:00:00Z",
+            "last": "2026-11-03T00:00:00Z", "rows": [{"message": "unit failed"}],
+        }
+        with mock.patch.object(tickets, "_environment", return_value=["- OS: test"]):
+            _title, body = tickets._draft(issue, None, {}, False)
+        self.assertNotIn("## Affected Components", body)
+
     def test_deep_request_records_held_packages(self):
         import json
         import pathlib

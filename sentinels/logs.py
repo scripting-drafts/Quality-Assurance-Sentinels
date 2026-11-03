@@ -81,34 +81,50 @@ def tail_lines(path, n: int) -> list[str]:
         return []
 
 
-def header(conn) -> list[str]:
-    """Small live status block printed before following starts."""
-    from . import correlate
+def _count(conn, sql: str) -> int:
+    try:
+        return int(conn.execute(sql).fetchone()[0])
+    except Exception:  # noqa: BLE001 - a viewer must never break on a missing table
+        return 0
 
-    def count(sql: str) -> int:
-        try:
-            return int(conn.execute(sql).fetchone()[0])
-        except Exception:  # noqa: BLE001 - a header must never break the viewer
-            return 0
+
+def _dir_count(path) -> int:
+    try:
+        return sum(1 for child in path.iterdir() if child.is_dir())
+    except OSError:
+        return 0
+
+
+def state_rows(conn) -> list[tuple[str, str]]:
+    """The numbers every view shares."""
+    from . import correlate, holds
 
     ready = 0
     try:
         ready = sum(1 for c in correlate.aggregate(conn) if c["ready"])
     except Exception:  # noqa: BLE001
         pass
-    open_findings = count("SELECT COUNT(*) FROM findings WHERE status='open'")
-    rows = [
-        ("boots", f"{count('SELECT COUNT(*) FROM boots')} recorded, "
-                  f"{count('SELECT COUNT(*) FROM boots WHERE ended_clean=0')} unclean"),
+    hold = holds.counts()
+    open_findings = _count(conn, "SELECT COUNT(*) FROM findings WHERE status='open'")
+    return [
+        ("boots", f"{_count(conn, 'SELECT COUNT(*) FROM boots')} recorded, "
+                  f"{_count(conn, 'SELECT COUNT(*) FROM boots WHERE ended_clean=0')} unclean"),
         ("findings", f"{open_findings} open"),
-        ("drafts", f"{count('SELECT COUNT(*) FROM ticket_drafts')} pending"),
+        ("drafts", f"{_count(conn, 'SELECT COUNT(*) FROM ticket_drafts')} pending"),
+        ("raise", f"{_dir_count(config.RAISE_DIR)} staged, "
+                  f"{_dir_count(config.STANDBY_DIR)} in standby"),
         ("correlations", f"{ready} ticket-ready"),
-        ("notifications", f"{count('SELECT COUNT(*) FROM notifications WHERE delivered=0')} undelivered"),
+        ("notifications", f"{_count(conn, 'SELECT COUNT(*) FROM notifications WHERE delivered=0')} undelivered"),
+        ("holds", f"{hold['held_total']} held, {hold['held_installed']} installed"
+                  f"{' (GLOBAL HOLD)' if hold['mass_hold'] else ''}"),
         ("cross-check", _last_crosscheck(conn)),
     ]
+
+
+def header(conn) -> list[str]:
+    """Small live status block printed before following starts."""
     lines = ["qa-sentinels live monitor", ""]
-    for label, value in rows:
-        lines.append(f"  {label:<14} {value}")
+    lines += [f"  {label:<14} {value}" for label, value in state_rows(conn)]
     lines += ["", f"  log            {config.VAR / 'cron.log'}", ""]
     return lines
 
@@ -123,6 +139,70 @@ def _last_crosscheck(conn) -> str:
     if not row:
         return "never"
     return f"{row['ts']} (drift {row['drift']})"
+
+
+def _live_sections(conn, path, lines: int) -> list[tuple[str, list[str]]]:
+    """One entry per section, in display order. Queried fresh each cycle."""
+    from . import correlate
+
+    sections = [
+        ("State", [f"  {label:<14} {value}" for label, value in state_rows(conn)]),
+    ]
+
+    findings = conn.execute(
+        "SELECT severity, rule, subject, detail FROM findings WHERE status='open'"
+        " ORDER BY ts DESC LIMIT 6"
+    ).fetchall() if _count(conn, "SELECT COUNT(*) FROM findings") else []
+    body = [
+        f"  {row['severity']:<9} {row['rule']:<18} {str(row['subject'])[:16]:<16} "
+        f"{(row['detail'] or '')[:90]}"
+        for row in findings
+    ]
+    sections.append(("Open findings", body or ["  none"]))
+
+    ready = 0
+    try:
+        ready = sum(1 for c in correlate.aggregate(conn) if c["ready"])
+    except Exception:  # noqa: BLE001
+        pass
+    sections.append(("Ticket pipeline", [
+        f"  drafts {_count(conn, 'SELECT COUNT(*) FROM ticket_drafts')}"
+        f" · raise {_dir_count(config.RAISE_DIR)}"
+        f" · standby {_dir_count(config.STANDBY_DIR)}"
+        f" · ready correlations {ready}"
+    ]))
+
+    tail = [format_line(line, color=False) for line in tail_lines(path, lines)]
+    sections.append(("Recent activity", tail or ["  (log empty)"]))
+    return sections
+
+
+def live(path, lines: int = 10, color: bool = True, interval: int = 5) -> None:
+    """Iterate the sections, redrawing in place until interrupted."""
+    from . import db
+
+    path = str(path)
+    try:
+        while True:
+            if color:
+                sys.stdout.write("\033[2J\033[H")
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{COLORS['meta'] if color else ''}qa-sentinels live · {stamp}"
+                  f"{RESET if color else ''}")
+            with db.session() as conn:
+                for title, body in _live_sections(conn, path, lines):
+                    pad = "─" * max(0, 46 - len(title))
+                    heading = f"── {title} {pad}"
+                    print(f"{COLORS['info'] if color else ''}{heading}{RESET if color else ''}")
+                    for line in body:
+                        print(line)
+                    print()
+            if not color:
+                print("[live] non-interactive output: rendered once")
+                return
+            time.sleep(max(1, interval))
+    except KeyboardInterrupt:
+        print("\n[live] stopped", flush=True)
 
 
 def follow(path, lines: int = 20, color: bool = True, poll: float = 0.5) -> None:

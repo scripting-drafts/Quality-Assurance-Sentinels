@@ -574,6 +574,52 @@ class HeldPackageTests(unittest.TestCase):
             _title, body = tickets._draft(issue, None, {}, False)
         self.assertNotIn("## Affected Components", body)
 
+    def _draft_body(self, rows):
+        from unittest import mock
+        from sentinels import tickets
+
+        issue = {
+            "key": "k", "vendor": "nvidia", "signature": "sig",
+            "kind": "crash", "count": 1, "first": "2026-11-03T00:00:00Z",
+            "last": "2026-11-03T00:00:00Z", "rows": rows,
+        }
+        with mock.patch.object(tickets, "_environment", return_value=["- OS: test"]), \
+             mock.patch.object(tickets.packages, "owner", return_value={}), \
+             mock.patch.object(tickets.holds, "relevant", return_value={
+                 "outdated": [], "mass_hold": False, "relevant": [],
+                 "held_total": 0, "held_installed": 0}):
+            return tickets._draft(issue, None, {}, False)[1]
+
+    def test_core2_section_is_omitted_when_inconclusive(self):
+        body = self._draft_body([{
+            "ts": "2026-11-03T00:00:00Z", "comm": "nvidia-settings",
+            "exe": "/usr/bin/nvidia-settings", "sig": "SIGABRT",
+            "cpus_allowed": None, "core2_involved": None,
+        }])
+        self.assertNotIn("Physical core 2 correlation", body)
+
+    def test_core2_section_is_kept_when_a_verdict_exists(self):
+        body = self._draft_body([{
+            "ts": "2026-11-03T00:00:00Z", "comm": "nvidia-settings",
+            "exe": "/usr/bin/nvidia-settings", "sig": "SIGABRT",
+            "cpus_allowed": "2,8", "core2_involved": 1,
+        }])
+        self.assertIn("Physical core 2 correlation", body)
+        self.assertIn("| `2,8` | yes |", body)
+
+    def test_live_view_iterates_every_section(self):
+        from unittest import mock
+        from sentinels import logs
+
+        conn = self._conn()
+        with mock.patch.object(logs, "state_rows", return_value=[("boots", "0")]):
+            sections = logs._live_sections(conn, "/tmp/does-not-exist.log", 3)
+        self.assertEqual(
+            [title for title, _body in sections],
+            ["State", "Open findings", "Ticket pipeline", "Recent activity"],
+        )
+        self.assertEqual(sections[1][1], ["  none"])
+
     def test_deep_request_records_held_packages(self):
         import json
         import pathlib

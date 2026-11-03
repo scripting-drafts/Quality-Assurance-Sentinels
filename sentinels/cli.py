@@ -411,6 +411,9 @@ def cmd_logs(args) -> int:
     path = config.VAR / "cron.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(exist_ok=True)
+    if args.live:
+        logs.live(path, lines=args.lines, color=color, interval=args.interval)
+        return 0
     with db.session() as conn:
         for line in logs.header(conn):
             print(line, flush=True)
@@ -1005,6 +1008,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("logs", help="live coloured sentinel log with timestamps")
     s.add_argument("-f", "--follow", action="store_true")
+    s.add_argument("--live", action="store_true",
+                   help="redraw all sections in place until interrupted")
+    s.add_argument("--interval", type=int, default=5, help="live refresh seconds")
     s.add_argument("--lines", type=int, default=20)
     s.add_argument("--no-color", action="store_true")
     s.add_argument("--force-color", action="store_true")

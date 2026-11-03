@@ -184,10 +184,20 @@ def _core2_table(rows: list[dict]) -> list[str]:
     lines += [
         "",
         "Affinity comes from the last `/proc/<pid>/status` sample before the crash. "
-        "Unknown affinity is labelled unknown, not discarded. This correlation is part "
-        "of the QA record and is included in every ticket.",
+        "When no row has a usable mask the section is omitted rather than reported "
+        "as unknown.",
     ]
     return lines
+
+
+def _core2_conclusive(rows: list[dict]) -> bool:
+    """A verdict needs both an affinity mask and a core-2 answer."""
+    return any(
+        row.get("sig")
+        and row.get("core2_involved") in (0, 1)
+        and row.get("cpus_allowed")
+        for row in rows
+    )
 
 
 def _affected_components(rows: list[dict]) -> list[str]:
@@ -265,9 +275,9 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
     ]
     if issue.get("notes"):
         lines += ["## Consistency", "", issue["notes"], ""]
-    if any("sig" in row for row in rows):
+    if _core2_conclusive(rows):
         lines += [
-            "## Physical core 2 correlation (required, do not omit)",
+            "## Physical core 2 correlation",
             "",
             *_core2_table(rows),
             "",

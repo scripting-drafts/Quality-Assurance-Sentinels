@@ -10,7 +10,7 @@ All commands use `./bin/qa <command>` from the repository root.
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |
 | Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports |
 | Deep diagnostics | `deploy-phase2`, `deep` | Configure and run queued tracing |
-| Monitoring display | `logs` | Read or follow timestamped activity |
+| Monitoring display | `logs` | Read, follow (`-f`) or redraw all sections live (`--live`) |
 
 Useful examples:
 

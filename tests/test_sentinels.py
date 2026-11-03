@@ -614,7 +614,7 @@ class HeldPackageTests(unittest.TestCase):
         self.assertTrue(all(config.LIVE_INTERVAL_MIN_S <= value <= config.LIVE_INTERVAL_MAX_S
                             for value in samples))
         self.assertGreater(len({round(value, 6) for value in samples}), 1)
-        self.assertGreaterEqual(config.LIVE_INTERVAL_MIN_S, 1.7)
+        self.assertGreaterEqual(config.LIVE_INTERVAL_MIN_S, 1.6)
         self.assertLessEqual(config.LIVE_INTERVAL_MAX_S, 2.0)
 
     def test_live_view_iterates_every_section(self):

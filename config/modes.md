@@ -18,7 +18,7 @@ environment variable read by `bin/qa`.
   phase 2 records `eBPF: unavailable` and continues with ftrace/perf.
 - `QA_PSI_MEMORY_FULL_ALERT=10`, `QA_MEM_AVAILABLE_ALERT_PCT=5`,
   `QA_TEMP_ALERT_C=90`, `QA_IO_PRESSURE_ALERT=50` — phase-1 thresholds.
-- `QA_LIVE_MIN_S=1.7`, `QA_LIVE_MAX_S=2.0` — randomised live-view refresh bounds.
+- `QA_LIVE_MIN_S=1.6`, `QA_LIVE_MAX_S=2.0` — randomised live-view refresh bounds.
 - `QA_MIN_FREE_MIB=1024` — last-resort disk guard; ingestion pauses below it so
   the QA job cannot fill the disk and become the outage.
 

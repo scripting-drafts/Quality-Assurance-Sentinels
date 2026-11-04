@@ -817,7 +817,7 @@ class RaiseGateTests(unittest.TestCase):
             )
             issue = self._issue()
             raised = root / "tickets" / "raise"
-            standby = root / "tickets" / "in-standby"
+            standby = root / "tickets" / "standby"
             rejected = root / "tickets" / "rejected"
             marker = raised / "nvidia-old-deadbeef" / "KEEP.txt"
             marker.parent.mkdir(parents=True)

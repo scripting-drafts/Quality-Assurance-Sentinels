@@ -33,7 +33,7 @@ Run `./bin/qa --help` for the full command list and `./bin/qa <command> --help` 
 | `evidence/` | Evidence bundles and verification metadata |
 | `tickets/drafts/` | Candidate vendor report drafts |
 | `tickets/raise/` | Drafts judged ready for human review/submission |
-| `tickets/in-standby/` | Lower-confidence or deferred drafts |
+| `tickets/standby/` | Lower-confidence or deferred drafts |
 | `tickets/rejected/` | Reports explained by a held, outdated local build |
 | `triage/core2/` | Core-2 cases, deep-trace requests, and results |
 | `config/` | Settings documentation and optional reporter identity |

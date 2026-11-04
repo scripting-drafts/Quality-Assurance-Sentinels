@@ -77,7 +77,7 @@ To remove the user cron entries installed by this project:
 3. **Correlate prior events.** `./bin/qa correlate --days 30` looks for component signatures preceding unexpected stops, including recurrence across boots.
 4. **Follow a signature.** `./bin/qa trace '<message-or-fingerprint>'` brings together related information from different layers.
 5. **Create and validate evidence.** `./bin/qa evidence --reason "unexpected shutdown" --hours 24` produces an evidence bundle. Use `./bin/qa verify PATH_TO_BUNDLE` to check a bundle's manifest and hashes.
-6. **Review potential vendor reports.** `./bin/qa tickets --days 7` generates drafts. `./bin/qa raise --days 30` places viable drafts in `tickets/raise/`, crashes explained by a held, outdated package in `tickets/rejected/`, and other drafts in `tickets/in-standby/` for later examination.
+6. **Review potential vendor reports.** `./bin/qa tickets --days 7` generates drafts. `./bin/qa raise --days 30` places viable drafts in `tickets/raise/`, crashes explained by a held, outdated package in `tickets/rejected/`, and other drafts in `tickets/standby/` for later examination.
 
 The system can mark a silent stop as critical and score recurring signatures. **A score or draft does not establish causality**; review the logs, evidence, and proposed explanation before sending a report.
 

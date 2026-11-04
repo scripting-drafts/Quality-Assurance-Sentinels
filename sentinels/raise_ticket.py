@@ -164,7 +164,7 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
           root=None, bucket: str = "raise") -> dict:
     """Create the per-ticket directory with its own evidence.
 
-    The layout is identical in raise/, rejected/ and in-standby/, so a ticket
+    The layout is identical in raise/, rejected/ and standby/, so a ticket
     can move between buckets without losing evidence or history.
     """
     directory = (root or config.RAISE_DIR) / _dir_name(draft, issue)

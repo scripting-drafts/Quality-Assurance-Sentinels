@@ -17,7 +17,7 @@
 #   --skip-ebpf             deploy layer 2 without building the eBPF tracer
 #   --user NAME             operator account for the systemd and deep units
 #   --yes                   install the defaults without prompting
-#   --dry-run               print the plan, change nothing
+#   --dry-run               print the plan and commands, change nothing
 #   --phase2 / --no-phase2  legacy aliases for --layer2 / --no-layer2
 #   -h, --help              this text
 set -euo pipefail
@@ -141,18 +141,13 @@ echo "  layer 1 (phase 1): $layer1_plan"
 echo "  layer 2 (phase 2): $layer2_plan"
 echo
 
-if [[ $DRY_RUN -eq 1 ]]; then
-  echo "dry run: no changes made"
-  exit 0
-fi
-
-if [[ $ASSUME_YES -eq 0 ]]; then
+if [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 ]]; then
   ask "Proceed?" y || { echo "aborted"; exit 1; }
 fi
 
 run() {
   printf '   $ %s\n' "$*"
-  "$@"
+  [[ $DRY_RUN -eq 1 ]] || "$@"
 }
 
 # ---------------------------------------------------------------- layer 1
@@ -180,7 +175,7 @@ if [[ $LAYER1 -eq 1 && "$SCHEDULE" == "systemd" ]]; then
   [[ $KEEP_CRON -eq 0 ]] && install_args+=(--takeover)
   if [[ ${EUID} -eq 0 ]]; then
     run root/install-system.sh "${install_args[@]}"
-  elif command -v sudo >/dev/null 2>&1; then
+  elif command -v sudo >/dev/null 2>&1 || [[ $DRY_RUN -eq 1 ]]; then
     run sudo root/install-system.sh "${install_args[@]}"
   else
     die "need sudo to install the system timer; rerun as root"
@@ -194,7 +189,11 @@ else
 fi
 
 echo
-echo "installed"
+if [[ $DRY_RUN -eq 1 ]]; then
+  echo "dry run complete: the commands above were not executed"
+else
+  echo "installed"
+fi
 echo "  layer 1: $([[ $LAYER1 -eq 1 ]] && echo yes || echo no)"
 echo "  layer 2: $([[ $LAYER2 -eq 1 ]] && echo yes || echo no)"
 echo "verify with: $ROOT/bin/qa status"

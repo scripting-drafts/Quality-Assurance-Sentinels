@@ -380,7 +380,11 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(both.returncode, 0, both.stderr)
         self.assertIn("layer 1 (phase 1): build sampler", both.stdout)
         self.assertIn("layer 2 (phase 2): deep-trace", both.stdout)
-        self.assertIn("dry run", both.stdout)
+        self.assertIn("   $ make -C src install", both.stdout)
+        self.assertIn("   $ ./bin/qa deploy-phase2", both.stdout)
+        self.assertIn("   $ ./bin/qa install-cron", both.stdout)
+        self.assertIn("dry run complete", both.stdout)
+        self.assertIn("not executed", both.stdout)
 
         phase2_only = subprocess.run(
             [script, "--dry-run", "--yes", "--no-layer1", "--layer2"],
@@ -388,6 +392,14 @@ class DeploymentTests(unittest.TestCase):
         )
         self.assertEqual(phase2_only.returncode, 0, phase2_only.stderr)
         self.assertIn("layer 1 (phase 1): skipped", phase2_only.stdout)
+        self.assertIn("   $ ./bin/qa deploy-phase2", phase2_only.stdout)
+
+        systemd = subprocess.run(
+            [script, "--dry-run", "--yes", "--layer1", "--no-layer2", "--systemd"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(systemd.returncode, 0, systemd.stderr)
+        self.assertIn("$ sudo root/install-system.sh --takeover", systemd.stdout)
 
         nothing = subprocess.run(
             [script, "--yes", "--no-layer1", "--no-layer2"],

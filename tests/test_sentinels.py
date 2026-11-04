@@ -352,6 +352,50 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("PathExistsGlob=$ROOT/triage/core2/deep-requests/*.json", script)
         self.assertEqual(config.DEEP_REQUEST_DIR, config.TRIAGE_DIR / "deep-requests")
 
+    def test_single_installer_is_interactive_and_covers_both_layers(self):
+        import os
+        import subprocess
+        from sentinels import config
+
+        script = config.ROOT / "install.sh"
+        text = script.read_text()
+        self.assertIn('dirname "${BASH_SOURCE[0]}")"', text)
+        self.assertNotIn('BASH_SOURCE[0]}")/..', text)
+        for needle in ("--layer1", "--no-layer1", "--layer2", "--no-layer2",
+                       "--dry-run", "--yes", "ask "):
+            self.assertIn(needle, text)
+        self.assertTrue(os.access(script, os.X_OK))
+        check = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_installer_dry_run_selects_each_layer_without_changing_anything(self):
+        import subprocess
+        from sentinels import config
+
+        script = str(config.ROOT / "install.sh")
+        both = subprocess.run(
+            [script, "--dry-run", "--yes", "--layer1", "--layer2"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(both.returncode, 0, both.stderr)
+        self.assertIn("layer 1 (phase 1): build sampler", both.stdout)
+        self.assertIn("layer 2 (phase 2): deep-trace", both.stdout)
+        self.assertIn("dry run", both.stdout)
+
+        phase2_only = subprocess.run(
+            [script, "--dry-run", "--yes", "--no-layer1", "--layer2"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(phase2_only.returncode, 0, phase2_only.stderr)
+        self.assertIn("layer 1 (phase 1): skipped", phase2_only.stdout)
+
+        nothing = subprocess.run(
+            [script, "--yes", "--no-layer1", "--no-layer2"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(nothing.returncode, 2)
+        self.assertIn("nothing selected", nothing.stderr)
+
     def test_privilege_failure_markers(self):
         from sentinels.cli import _privilege_failure
 

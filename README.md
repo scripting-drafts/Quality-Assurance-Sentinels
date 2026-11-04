@@ -28,6 +28,15 @@ Some information may be unavailable without journal permissions or elevated capa
 
 ## Quick start: Phase 1
 
+The supported entry point is the single interactive installer. It asks which layers to add and can install either one or both:
+
+```bash
+./install.sh              # interactive: layer 1 (phase 1) and/or layer 2 (phase 2)
+./install.sh --dry-run    # show the plan without changing anything
+```
+
+Layer 1 is optional and covers the routine monitor; layer 2 adds deep tracing. The explicit commands below remain useful for manual or partial installs.
+
 Run these commands **from the directory containing the cloned repository**:
 
 ```bash
@@ -53,7 +62,7 @@ make -C src install
 
 `tick` performs one monitoring pass; `phase1` is an alias. The cron installation also configures a daily run at 08:00. The data and reports remain on the local machine.
 
-> **Installer note:** The repository also contains `install.sh`, but the version reviewed on 2026-11-03 resolves its project root to the parent directory of the repository. Until that path is corrected, use the explicit commands above instead of relying on `./install.sh`.
+> **Single installer:** `./install.sh` is interactive and adds either layer: layer 1 (phase 1: sampler, first tick, scheduling) and/or layer 2 (phase 2: deep trace + eBPF). Preview with `./install.sh --dry-run`; unattended installs use `./install.sh --layer1 --layer2 --yes`. Use `--no-layer1` for phase 2 only, and `--systemd` to schedule with a system timer instead of cron.
 
 ### Check monitoring activity
 

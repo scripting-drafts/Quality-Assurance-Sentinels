@@ -48,23 +48,23 @@ cd qa-sentinels
 # Compile the local sampler into bin/qa_sample.
 make -C src install
 
-# Initialize storage and perform the first collection.
+# Initialize storage and perform the first routine pass.
 ./bin/qa init
 ./bin/qa preflight
-./bin/qa tick
+./bin/qa cycle
 
 # Inspect the result.
 ./bin/qa status
 ./bin/qa findings
 ./bin/qa boots
 
-# Optional: schedule one monitoring tick per minute.
+# Optional: schedule the routine cycle every minute.
 ./bin/qa install-cron
 ```
 
-`tick` performs one monitoring pass; `phase1` is an alias. The cron installation also configures a daily run at 08:00. The data and reports remain on the local machine.
+`cycle` performs one routine pass, running every due layer-1 duty: daily report, notification drain, correlation refresh and crosscheck. The schedule invokes only `cycle`; `tick` and `phase1` remain aliases. The data and reports remain on the local machine.
 
-> **Single installer:** `./install.sh` is interactive and adds either layer: layer 1 (phase 1: sampler, first tick, scheduling) and/or layer 2 (phase 2: deep trace + eBPF). Preview with `./install.sh --dry-run`; unattended installs use `./install.sh --layer1 --layer2 --yes`. Use `--no-layer1` for phase 2 only, and `--systemd` to schedule with a system timer instead of cron.
+> **Single installer:** `./install.sh` is interactive and adds either layer: layer 1 (phase 1: sampler, first cycle, scheduling) and/or layer 2 (phase 2: deep trace + eBPF). Preview with `./install.sh --dry-run`; unattended installs use `./install.sh --layer1 --layer2 --yes`. Use `--no-layer1` for phase 2 only, and `--systemd` to schedule with a system timer instead of cron.
 
 ### Check monitoring activity
 

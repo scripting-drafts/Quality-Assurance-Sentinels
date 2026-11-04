@@ -470,6 +470,52 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(ok, detail)
 
 
+class CycleTests(unittest.TestCase):
+    """Layer 1 runs every due duty from one scheduled command."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def test_cycle_and_legacy_aliases_share_one_command(self):
+        from sentinels import cli
+
+        parser = cli.build_parser()
+        for name in ("cycle", "tick", "phase1"):
+            args = parser.parse_args([name])
+            self.assertIs(args.func, cli.cmd_cycle, name)
+
+    def test_due_tasks_persist_their_last_run(self):
+        from sentinels import cli
+
+        conn = self._conn()
+        self.assertTrue(cli._cycle_due(conn, "raise", 3600))
+        cli._cycle_mark(conn, "raise")
+        self.assertFalse(cli._cycle_due(conn, "raise", 3600))
+        self.assertTrue(cli._cycle_due(conn, "raise", 0))
+
+    def test_cron_block_schedules_only_cycle(self):
+        from sentinels import cli
+
+        block = cli._cron_block()
+        self.assertEqual(block.count("qa cycle"), 2)  # every minute + @reboot
+        self.assertIn("var/cycle.lock", block)
+        for gone in ("qa tick", "--drafts", "crosscheck", "report --kind daily"):
+            self.assertNotIn(gone, block)
+
+    def test_systemd_timer_runs_the_locked_cycle(self):
+        from sentinels import config
+
+        script = (config.ROOT / "root" / "install-system.sh").read_text()
+        self.assertIn("flock -n $ROOT/var/cycle.lock $ROOT/bin/qa cycle", script)
+        self.assertNotIn("ExecStart=$ROOT/bin/qa tick", script)
+
+
 class HeldPackageTests(unittest.TestCase):
     """A crash in a held, outdated module may already be fixed upstream."""
 

@@ -5,7 +5,7 @@ All commands use `./bin/qa <command>` from the repository root.
 | Area | Commands | What they do |
 | --- | --- | --- |
 | Setup and operations | `install.sh`, `uninstall.sh`, `init`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, inspect prerequisites, check scheduling and security posture |
-| Routine collection | `tick` (`phase1`), `sample`, `ingest`, `inventory`, `report` | Capture and summarize system state |
+| Routine collection | `cycle` (`tick`, `phase1`), `sample`, `ingest`, `inventory`, `report` | Capture system state and run every due layer-1 duty |
 | Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, events, their relationships, and held/outdated packages |
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |
 | Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports |
@@ -48,10 +48,10 @@ Examples:
 
 ```bash
 # Broader collection: more information and higher storage usage.
-QA_FULL_CAPTURE=1 ./bin/qa tick
+QA_FULL_CAPTURE=1 ./bin/qa cycle
 
 # Change the monitored physical core or its logical CPU mapping if needed.
-QA_CORE2_ID=2 QA_CORE2_CPUS=2,8 ./bin/qa tick
+QA_CORE2_ID=2 QA_CORE2_CPUS=2,8 ./bin/qa cycle
 ```
 
 The default retention configuration is bounded. A low-free-space guard can suspend ingestion instead of filling the disk. Unbounded collection (`QA_KEEP_FOREVER=1`, debug journal capture, unlimited evidence events) requires conscious capacity planning.

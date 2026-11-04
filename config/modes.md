@@ -14,6 +14,10 @@ environment variable read by `bin/qa`.
 - `QA_DEEP_AUTO=1` — queue phase-2 tracing for critical phase-1 findings.
 - `QA_DEEP_DURATION_S=30`, `QA_DEEP_MAX_DURATION_S=120` — trace window.
 - `QA_DEEP_REQUEST_COOLDOWN_S=1800` — minimum gap per finding.
+- `QA_CYCLE_CORRELATE_S=300` — correlation refresh and notification drain cadence.
+- `QA_CYCLE_RAISE_S=3600` — ticket raise-gate re-triage cadence.
+- `QA_CYCLE_CROSSCHECK_S=21600` — crosscheck cadence.
+- `QA_CYCLE_DAILY_HOUR=8` — earliest local hour for the daily report.
 - eBPF is used when `bin/qa_ebpf` is built and phase 2 has `CAP_BPF`; otherwise
   phase 2 records `eBPF: unavailable` and continues with ftrace/perf.
 - `QA_PSI_MEMORY_FULL_ALERT=10`, `QA_MEM_AVAILABLE_ALERT_PCT=5`,

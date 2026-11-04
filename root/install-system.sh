@@ -72,7 +72,7 @@ DEEP_PATH=/etc/systemd/system/qa-sentinel-deep.path
 if [[ $PHASE2_ONLY -eq 0 ]]; then
 cat >"$SERVICE" <<EOF
 [Unit]
-Description=qa-sentinels QA evidence tick
+Description=qa-sentinels layer-1 routine cycle
 Documentation=file://$ROOT/README.md
 After=local-fs.target
 
@@ -96,7 +96,7 @@ RestrictSUIDSGID=yes
 UMask=0077
 Nice=10
 IOSchedulingClass=idle
-ExecStart=$ROOT/bin/qa tick
+ExecStart=/usr/bin/flock -n $ROOT/var/cycle.lock $ROOT/bin/qa cycle
 TimeoutStartSec=300
 EOF
 

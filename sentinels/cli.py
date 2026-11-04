@@ -23,16 +23,11 @@ CRON_END = "# <<< qa-sentinels <<<"
 
 def _cron_block() -> str:
     root = config.ROOT
-    qa = root / "bin" / "qa"
     return "\n".join(
         [
             CRON_BEGIN,
-            f"* * * * * cd {root} && flock -n var/tick.lock ./bin/qa tick >>var/cron.log 2>&1",
-            f"7 8 * * * cd {root} && ./bin/qa report --kind daily >>var/cron.log 2>&1",
-            f"@reboot sleep 30 && cd {root} && ./bin/qa tick >>var/cron.log 2>&1",
-            f"*/5 * * * * cd {root} && flock -n var/correlate.lock ./bin/qa correlate --drafts && ./bin/qa notify --drain >>var/cron.log 2>&1",
-            f"23 * * * * cd {root} && flock -n var/raise.lock ./bin/qa raise >>var/cron.log 2>&1",
-            f"17 */6 * * * cd {root} && flock -n var/crosscheck.lock ./bin/qa crosscheck --deep --notify >>var/cron.log 2>&1",
+            f"* * * * * cd {root} && flock -n var/cycle.lock ./bin/qa cycle >>var/cron.log 2>&1",
+            f"@reboot sleep 30 && cd {root} && flock -n var/cycle.lock ./bin/qa cycle >>var/cron.log 2>&1",
             CRON_END,
         ]
     )
@@ -701,7 +696,7 @@ def cmd_install_cron(args) -> int:
         cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
         existing = cur.stdout if cur.returncode == 0 else ""
     except FileNotFoundError:
-        print("crontab is not installed; use the systemd units or run `qa tick` from your scheduler")
+        print("crontab is not installed; use the systemd units or run `qa cycle` from your scheduler")
         return 1
     lines = existing.splitlines()
     if CRON_BEGIN in lines:
@@ -738,7 +733,16 @@ def _ensure_delta_baseline(conn) -> None:
             pass
 
 
-def cmd_tick(args) -> int:
+def _cycle_due(conn, key: str, seconds: int) -> bool:
+    last = db.meta_get(conn, f"cycle|{key}")
+    return not last or (utcnow() - parse_iso(last)).total_seconds() >= seconds
+
+
+def _cycle_mark(conn, key: str) -> None:
+    db.meta_set(conn, f"cycle|{key}", iso())
+
+
+def cmd_cycle(args) -> int:
     config.ensure_dirs()
     result: dict = {"ts": iso()}
     failed = 0
@@ -753,7 +757,7 @@ def cmd_tick(args) -> int:
         except Exception as exc:  # noqa: BLE001
             failed += 1
             result["sample_error"] = str(exc)[:300]
-            db.record_run(conn, "tick/sample", False, str(exc))
+            db.record_run(conn, "cycle/sample", False, str(exc))
             data = None
 
         try:
@@ -761,9 +765,9 @@ def cmd_tick(args) -> int:
         except Exception as exc:  # noqa: BLE001
             failed += 1
             result["ingest_error"] = str(exc)[:300]
-            db.record_run(conn, "tick/ingest", False, str(exc))
+            db.record_run(conn, "cycle/ingest", False, str(exc))
 
-        # Boot boundary: classify the boots that ended since the last tick. This
+        # Boot boundary: classify the boots that ended since the last cycle. This
         # is the only layer that can see a hard reset, because it runs after it.
         try:
             boundary = boot.collect(conn)
@@ -783,7 +787,7 @@ def cmd_tick(args) -> int:
         except Exception as exc:  # noqa: BLE001
             failed += 1
             result["boot_error"] = str(exc)[:300]
-            db.record_run(conn, "tick/boot", False, str(exc))
+            db.record_run(conn, "cycle/boot", False, str(exc))
 
         due, why = inventory.is_due(conn)
         if due:
@@ -800,7 +804,7 @@ def cmd_tick(args) -> int:
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 result["inventory_error"] = str(exc)[:300]
-                db.record_run(conn, "tick/inventory", False, str(exc))
+                db.record_run(conn, "cycle/inventory", False, str(exc))
 
         current_boot = (data or {}).get("boot_id") or ""
         startup_done_for = db.meta_get(conn, "startup_report_boot")
@@ -817,7 +821,7 @@ def cmd_tick(args) -> int:
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 result["startup_error"] = str(exc)[:300]
-                db.record_run(conn, "tick/startup", False, str(exc))
+                db.record_run(conn, "cycle/startup", False, str(exc))
 
         # New crash or new critical event: seal evidence and refresh drafts now,
         # not at the next daily report.
@@ -841,7 +845,7 @@ def cmd_tick(args) -> int:
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 result["auto_ticket_error"] = str(exc)[:300]
-                db.record_run(conn, "tick/tickets", False, str(exc))
+                db.record_run(conn, "cycle/tickets", False, str(exc))
 
         # Core-2 side queue: refresh after new evidence or at least every 10 min.
         last_tri = db.meta_get(conn, "last_triage_run")
@@ -853,7 +857,7 @@ def cmd_tick(args) -> int:
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 result["triage_error"] = str(exc)[:300]
-                db.record_run(conn, "tick/triage", False, str(exc))
+                db.record_run(conn, "cycle/triage", False, str(exc))
 
         # Phase 1 detection: turn new raw evidence into explicit findings and,
         # when severe, queue phase-2 deep tracing and seal a phase-1 bundle.
@@ -893,11 +897,67 @@ def cmd_tick(args) -> int:
         except Exception as exc:  # noqa: BLE001
             failed += 1
             result["phase1_error"] = str(exc)[:300]
-            db.record_run(conn, "tick/phase1", False, str(exc))
+            db.record_run(conn, "cycle/phase1", False, str(exc))
+
+        # Layer 1 owns the whole routine loop: correlation refresh, the raise
+        # gate, cross-check and notification delivery are due-based and
+        # persisted, so cron and systemd only need to run this one command.
+        if _cycle_due(conn, "correlate", config.CYCLE_CORRELATE_S):
+            try:
+                corr = correlate.correlate(conn, days=30, notify=True)
+                made = tickets.generate(conn, days=7)
+                result["correlate"] = {
+                    "unclean_boots": corr["unclean_boots"],
+                    "clusters": corr["clusters"],
+                    "ticket_ready": corr["ticket_ready"],
+                    "drafts": len(made),
+                }
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["correlate_error"] = str(exc)[:300]
+                db.record_run(conn, "cycle/correlate", False, str(exc))
+            _cycle_mark(conn, "correlate")
+
+        if _cycle_due(conn, "raise", config.CYCLE_RAISE_S):
+            try:
+                gate = raise_ticket.run(conn, days=30)
+                result["raise"] = {
+                    "viable": gate["viable"],
+                    "rejected": gate["rejected"],
+                    "rejected_staged": len(gate["rejected_staged"]),
+                }
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["raise_error"] = str(exc)[:300]
+                db.record_run(conn, "cycle/raise", False, str(exc))
+            _cycle_mark(conn, "raise")
+
+        if _cycle_due(conn, "crosscheck", config.CYCLE_CROSSCHECK_S):
+            try:
+                check = crosscheck.run(conn, days=30, deep=True, notify_drift=True)
+                result["crosscheck"] = {
+                    "drafts": check["drafts"],
+                    "drift": check["drift"],
+                }
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["crosscheck_error"] = str(exc)[:300]
+                db.record_run(conn, "cycle/crosscheck", False, str(exc))
+            _cycle_mark(conn, "crosscheck")
+
+        if _cycle_due(conn, "notify", config.CYCLE_CORRELATE_S):
+            try:
+                result["notify"] = notify.drain(conn)
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["notify_error"] = str(exc)[:300]
+                db.record_run(conn, "cycle/notify", False, str(exc))
+            _cycle_mark(conn, "notify")
 
         now_local = datetime.now().astimezone()
         today = now_local.strftime("%Y-%m-%d")
-        if now_local.hour >= 8 and db.meta_get(conn, "last_daily_report_date") != today:
+        if (now_local.hour >= config.CYCLE_DAILY_HOUR
+                and db.meta_get(conn, "last_daily_report_date") != today):
             try:
                 _ensure_delta_baseline(conn)
                 rep = report.write_report(conn, "daily", 24)
@@ -907,9 +967,9 @@ def cmd_tick(args) -> int:
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 result["daily_error"] = str(exc)[:300]
-                db.record_run(conn, "tick/daily", False, str(exc))
+                db.record_run(conn, "cycle/daily", False, str(exc))
 
-        db.record_run(conn, "tick", failed == 0, json.dumps(result)[:1500])
+        db.record_run(conn, "cycle", failed == 0, json.dumps(result)[:1500])
 
     print(json.dumps(result, indent=2))
     return 1 if failed else 0
@@ -925,8 +985,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("init", help="create directories/database and validate the sampler")
     s.set_defaults(func=cmd_init)
 
-    s = sub.add_parser("tick", help="one scheduled pass: sample, ingest, inventory/report when due")
-    s.set_defaults(func=cmd_tick)
+    s = sub.add_parser("cycle", help="one routine pass: sample, ingest and every due layer-1 task")
+    s.set_defaults(func=cmd_cycle)
+
+    s = sub.add_parser("tick", help="legacy alias for cycle")
+    s.set_defaults(func=cmd_cycle)
 
     s = sub.add_parser("sample", help="take one kernel/memory/CPU sample")
     s.set_defaults(func=cmd_sample)
@@ -1025,8 +1088,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--rebaseline", action="store_true", help="reset the drift baseline after an intentional change")
     s.set_defaults(func=cmd_posture)
 
-    s = sub.add_parser("phase1", help="alias for the real-time tick (detect + evidence)")
-    s.set_defaults(func=cmd_tick)
+    s = sub.add_parser("phase1", help="alias for cycle (phase 1)")
+    s.set_defaults(func=cmd_cycle)
 
     s = sub.add_parser("findings", help="list phase-1 findings and update their status")
     s.add_argument("--limit", type=int, default=50)
@@ -1066,7 +1129,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--user", help="operator account for the systemd unit (default: this user)")
     s.set_defaults(func=cmd_deploy_phase2)
 
-    s = sub.add_parser("install-cron", help="install the user schedule (1 min tick, 08:00 daily)")
+    s = sub.add_parser("install-cron", help="install the user schedule (1 min cycle, all layer-1 duties inside)")
     s.add_argument("--remove", action="store_true", help="remove the qa-sentinels cron block")
     s.set_defaults(func=cmd_install_cron)
 

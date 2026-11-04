@@ -3,7 +3,7 @@
 #
 # Two layers can be added independently:
 #   layer 1 (phase 1)  collection: build the sampler, initialise the store,
-#                      run one tick, and schedule it (cron or systemd timer)
+#                      run one cycle, and schedule it (cron or systemd timer)
 #   layer 2 (phase 2)  deep diagnostics: eBPF tracer and the systemd path unit
 #                      that consumes queued deep-trace requests
 #
@@ -121,9 +121,9 @@ fi
 # ---------------------------------------------------------------- plan
 if [[ $LAYER1 -eq 1 ]]; then
   if [[ "$SCHEDULE" == "systemd" ]]; then
-    layer1_plan="build sampler, init store, first tick, systemd timer"
+    layer1_plan="build sampler, init store, first cycle, systemd timer"
   else
-    layer1_plan="build sampler, init store, first tick, user cron"
+    layer1_plan="build sampler, init store, first cycle, user cron"
   fi
 else
   layer1_plan="skipped"
@@ -155,7 +155,7 @@ if [[ $LAYER1 -eq 1 ]]; then
   echo "== layer 1 (phase 1): collection"
   run make -C src install
   run ./bin/qa init
-  run ./bin/qa tick
+  run ./bin/qa cycle
 fi
 
 # ---------------------------------------------------------------- layer 2
@@ -184,8 +184,8 @@ elif [[ $LAYER1 -eq 1 ]]; then
   echo "== layer 1 (phase 1): cron"
   run ./bin/qa install-cron
 else
-  echo "== layer 1 skipped: nothing schedules the one-minute tick"
-  echo "   run $ROOT/bin/qa tick manually, or rerun ./install.sh --layer1"
+  echo "== layer 1 skipped: nothing schedules the one-minute cycle"
+  echo "   run $ROOT/bin/qa cycle manually, or rerun ./install.sh --layer1"
 fi
 
 echo

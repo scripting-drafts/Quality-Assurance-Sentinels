@@ -37,6 +37,13 @@ DEEP_DURATION_S = int(os.environ.get("QA_DEEP_DURATION_S", "30"))
 DEEP_MAX_DURATION_S = int(os.environ.get("QA_DEEP_MAX_DURATION_S", "120"))
 DEEP_AUTO = os.environ.get("QA_DEEP_AUTO", "1").lower() in ("1", "yes", "true", "on")
 DEEP_REQUEST_COOLDOWN_S = int(os.environ.get("QA_DEEP_REQUEST_COOLDOWN_S", "1800"))
+
+# layer 1 cycle: one command every minute owns the whole routine loop, so cron
+# and systemd schedules stay equivalent. Each task is due-based and persisted.
+CYCLE_CORRELATE_S = int(os.environ.get("QA_CYCLE_CORRELATE_S", "300"))
+CYCLE_RAISE_S = int(os.environ.get("QA_CYCLE_RAISE_S", "3600"))
+CYCLE_CROSSCHECK_S = int(os.environ.get("QA_CYCLE_CROSSCHECK_S", str(6 * 3600)))
+CYCLE_DAILY_HOUR = int(os.environ.get("QA_CYCLE_DAILY_HOUR", "8"))
 PSI_MEMORY_FULL_ALERT = float(os.environ.get("QA_PSI_MEMORY_FULL_ALERT", "10"))
 MEM_AVAILABLE_ALERT_PCT = float(os.environ.get("QA_MEM_AVAILABLE_ALERT_PCT", "5"))
 TEMP_ALERT_C = float(os.environ.get("QA_TEMP_ALERT_C", "90"))

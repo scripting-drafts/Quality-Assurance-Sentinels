@@ -362,7 +362,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn('dirname "${BASH_SOURCE[0]}")"', text)
         self.assertNotIn('BASH_SOURCE[0]}")/..', text)
         for needle in ("--layer1", "--no-layer1", "--layer2", "--no-layer2",
-                       "--dry-run", "--yes", "ask "):
+                       "--dry-run", "--check", "--yes", "ask ", "audit_install"):
             self.assertIn(needle, text)
         self.assertTrue(os.access(script, os.X_OK))
         check = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
@@ -407,6 +407,29 @@ class DeploymentTests(unittest.TestCase):
         )
         self.assertEqual(nothing.returncode, 2)
         self.assertIn("nothing selected", nothing.stderr)
+
+    def test_installer_check_reports_leftovers_without_changing_anything(self):
+        import subprocess
+        from sentinels import config
+
+        script = config.ROOT / "install.sh"
+        before = {p: p.stat().st_mtime for p in (
+            config.BIN / "qa_sample", config.ROOT / "README.md"
+        ) if p.exists()}
+        proc = subprocess.run(
+            [str(script), "--check"], capture_output=True, text=True, timeout=120,
+        )
+        self.assertIn(proc.returncode, (0, 1), proc.stderr)
+        self.assertIn("installation check", proc.stdout)
+        self.assertIn("schedulers", proc.stdout)
+        self.assertIn("leftovers", proc.stdout)
+        self.assertTrue(
+            "nothing was changed" in proc.stdout or "no leftovers" in proc.stdout,
+            proc.stdout,
+        )
+        self.assertNotIn("Proceed?", proc.stdout)
+        for path, stamp in before.items():
+            self.assertEqual(path.stat().st_mtime, stamp, path)
 
     def test_deploy_layer2_keeps_the_phase_alias(self):
         from sentinels import cli

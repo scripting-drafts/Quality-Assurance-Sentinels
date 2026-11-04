@@ -18,6 +18,7 @@
 #   --user NAME             operator account for the systemd and deep units
 #   --yes                   install the defaults without prompting
 #   --dry-run               print the plan and commands, change nothing
+#   --check                 report schedulers and leftovers, change nothing
 #   --phase2 / --no-phase2  legacy aliases for --layer2 / --no-layer2
 #   -h, --help              this text
 set -euo pipefail
@@ -33,11 +34,93 @@ KEEP_CRON=0
 SKIP_EBPF=0
 ASSUME_YES=0
 DRY_RUN=0
+CHECK=0
 USER_ARGS=()
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 die() { echo "$*" >&2; exit 2; }
+
+audit_install() {
+  local issues=0 found=0
+  local autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/qa-sentinels-logs.desktop"
+  local cron_text="" has_cron=0
+
+  echo "qa-sentinels installation check"
+  echo "  root: $ROOT"
+  echo
+  echo "schedulers"
+
+  if command -v crontab >/dev/null 2>&1; then
+    cron_text="$(crontab -l 2>/dev/null || true)"
+  fi
+  if [[ "$cron_text" == *">>> qa-sentinels >>>"* ]]; then
+    has_cron=1
+    if [[ "$cron_text" == *"bin/qa tick"* ]]; then
+      echo "  cron    : block present, still calls 'qa tick'"
+      echo "  [warn] stale cron block; run ./bin/qa install-cron"
+      issues=$((issues + 1))
+    else
+      echo "  cron    : block present, calls 'qa cycle'"
+    fi
+  else
+    echo "  cron    : no block"
+  fi
+
+  if [[ -e /etc/systemd/system/qa-sentinel.timer ]]; then
+    echo "  systemd : qa-sentinel.timer installed"
+    if [[ $has_cron -eq 1 ]]; then
+      echo "  [warn] both schedulers are installed; keep one"
+      issues=$((issues + 1))
+    fi
+  else
+    echo "  systemd : no qa-sentinel.timer"
+  fi
+
+  echo
+  echo "layer 2"
+  ./bin/qa deploy-layer2 --check 2>&1 | sed 's/^/  /' || true
+
+  echo
+  echo "leftovers"
+  note() { echo "  [$1] $2"; found=$((found + 1)); }
+
+  if [[ -d tickets/in-standby ]]; then
+    note warn "tickets/in-standby/ is the old bucket name; move it to tickets/standby/"
+  fi
+  if [[ -d tickets/raised ]]; then
+    local legacy
+    legacy="$(find tickets/raised -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "$legacy" -gt 0 ]]; then
+      note info "tickets/raised/ holds $legacy legacy ticket(s); the current layout does not use it"
+    fi
+  fi
+  if [[ -e src/qa_sample ]]; then
+    note info "src/qa_sample is a duplicate build copy of bin/qa_sample"
+  fi
+  local pycache
+  pycache="$(find . -type d -name __pycache__ -not -path './.git/*' 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "$pycache" -gt 0 ]]; then
+    note info "$pycache __pycache__ directory/directories"
+  fi
+  if [[ -e bin/qa-logs-terminal && ! -e "$autostart" ]]; then
+    note info "bin/qa-logs-terminal exists without its autostart entry"
+  fi
+  local lock
+  for lock in var/tick.lock var/correlate.lock var/raise.lock var/crosscheck.lock; do
+    if [[ -e "$lock" ]]; then
+      note info "$lock is a pre-cycle lock file"
+    fi
+  done
+
+  echo
+  if [[ $issues -eq 0 && $found -eq 0 ]]; then
+    echo "no leftovers"
+    return 0
+  fi
+  echo "$((issues + found)) leftover item(s); nothing was changed"
+  return 1
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -50,6 +133,7 @@ while [[ $# -gt 0 ]]; do
     --skip-ebpf)  SKIP_EBPF=1 ;;
     --yes|-y)     ASSUME_YES=1 ;;
     --dry-run)    DRY_RUN=1 ;;
+    --check|--reconcile) CHECK=1 ;;
     --user)
       [[ -n "${2:-}" ]] || die "--user needs a name"
       USER_ARGS=(--user "$2")
@@ -63,6 +147,10 @@ done
 
 cd "$ROOT"
 [[ -x bin/qa ]] || die "not a qa-sentinels checkout: $ROOT"
+
+if [[ $CHECK -eq 1 ]]; then
+  if audit_install; then exit 0; else exit 1; fi
+fi
 
 if [[ $ASSUME_YES -eq 0 && ( -z "$LAYER1" || -z "$LAYER2" ) && ! -t 0 ]]; then
   die "no terminal to prompt on; pass --layer1/--no-layer1 and --layer2/--no-layer2, or --yes"
@@ -182,6 +270,17 @@ if [[ $LAYER1 -eq 1 && "$SCHEDULE" == "systemd" ]]; then
   fi
 elif [[ $LAYER1 -eq 1 ]]; then
   echo "== layer 1: cron"
+  if [[ -e /etc/systemd/system/qa-sentinel.timer ]] && command -v systemctl >/dev/null 2>&1; then
+    echo "   leftover systemd timer found; disabling it so only cron schedules"
+    if [[ ${EUID} -eq 0 ]]; then
+      run systemctl disable --now qa-sentinel.timer
+    elif command -v sudo >/dev/null 2>&1 || [[ $DRY_RUN -eq 1 ]]; then
+      run sudo systemctl disable --now qa-sentinel.timer
+    else
+      echo "   ! cannot disable qa-sentinel.timer without sudo" >&2
+      echo "     run: sudo systemctl disable --now qa-sentinel.timer" >&2
+    fi
+  fi
   run ./bin/qa install-cron
 else
   echo "== layer 1 skipped: nothing schedules the one-minute cycle"

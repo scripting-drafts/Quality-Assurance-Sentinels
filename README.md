@@ -33,7 +33,10 @@ The supported entry point is the single interactive installer. It asks which lay
 ```bash
 ./install.sh              # interactive: layer 1 and/or layer 2
 ./install.sh --dry-run    # show the plan and commands without changing anything
+./install.sh --check      # report schedulers and leftover files, change nothing
 ```
+
+Reinstalling layer 1 with cron now disables a leftover `qa-sentinel.timer`; `--check` exits non-zero while leftovers remain.
 
 To remove installed hooks and compiled binaries while keeping collected history (`var/`, `journal/`, `evidence/`, `tickets/`, `triage/`), run `./uninstall.sh`; add `--purge-data` for a clean slate first.
 

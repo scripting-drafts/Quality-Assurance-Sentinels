@@ -21,6 +21,10 @@ environment variable read by `bin/qa`.
 - `QA_LOG_MAX_MB=20`, `QA_LOG_KEEP=10` — `var/cron.log` rotates by
   copytruncate at the size cap and keeps that many numbered copies (200 MiB
   total by default).
+- `QA_NOTIFY_TTL_DAYS=14` — undelivered notifications expire so their key can
+  be queued again later; delivered rows age out after 30 days.
+- `QA_NOTIFY_BACKOFF_S=300`, `QA_NOTIFY_BACKOFF_MAX_S=21600` — retry backoff
+  for failed deliveries; unattempted and least-attempted rows go first.
 - eBPF is used when `bin/qa_ebpf` is built and layer 2 has `CAP_BPF`; otherwise
   layer 2 records `eBPF: unavailable` and continues with ftrace/perf.
 - `QA_PSI_MEMORY_FULL_ALERT=10`, `QA_MEM_AVAILABLE_ALERT_PCT=5`,

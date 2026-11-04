@@ -12,7 +12,16 @@ This job compares three things and reports only differences:
 from __future__ import annotations
 
 from . import boot, correlate, notify, report, tickets
-from .util import iso
+from .util import iso, sha256_text
+
+
+def _drift_key(stale: list[dict], missing: list[dict],
+               ready_without_draft: list[dict]) -> str:
+    """One key per drift composition, so an unchanged problem is one alert."""
+    parts = sorted(d["issue_key"] for d in stale)
+    parts += sorted(i["key"] for i in missing)
+    parts += sorted(c["key"] for c in ready_without_draft)
+    return "crosscheck|" + sha256_text("|".join(parts))[:16]
 
 
 def run(conn, days: int = 30, deep: bool = False, notify_drift: bool = True) -> dict:
@@ -67,7 +76,7 @@ def run(conn, days: int = 30, deep: bool = False, notify_drift: bool = True) -> 
         report.append_journal(conn, f"Cross-check drift: {drift} item(s)", body, "crosscheck")
         if notify_drift:
             notify.enqueue(
-                conn, "crosscheck", f"crosscheck|{iso()}",
+                conn, "crosscheck", _drift_key(stale, missing, unready_drafts),
                 f"QA cross-check: {drift} drift item(s)",
                 body[:400],
                 detail=str(detail)[:1500],

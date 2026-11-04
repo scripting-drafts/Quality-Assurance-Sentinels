@@ -104,7 +104,10 @@ CREATE TABLE IF NOT EXISTS notifications (
     body TEXT,
     delivered INTEGER NOT NULL DEFAULT 0,
     detail TEXT,
-    path TEXT
+    path TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_attempt TEXT,
+    last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_notify_pending ON notifications(delivered, ts);
 CREATE TABLE IF NOT EXISTS crosschecks (
@@ -237,8 +240,14 @@ def init() -> None:
         if "last_ts" not in cols:
             conn.execute("ALTER TABLE events ADD COLUMN last_ts TEXT")
         ncols = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
-        if ncols and "path" not in ncols:
-            conn.execute("ALTER TABLE notifications ADD COLUMN path TEXT")
+        for column, ddl in (
+            ("path", "TEXT"),
+            ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_attempt", "TEXT"),
+            ("last_error", "TEXT"),
+        ):
+            if ncols and column not in ncols:
+                conn.execute(f"ALTER TABLE notifications ADD COLUMN {column} {ddl}")
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version','1')")
 
 

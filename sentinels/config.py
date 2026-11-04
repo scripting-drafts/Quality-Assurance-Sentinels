@@ -87,6 +87,11 @@ INVENTORY_RETENTION_DAYS = int(os.environ.get("QA_INVENTORY_RETENTION_DAYS", "90
 LOG_MAX_MB = max(1, int(os.environ.get("QA_LOG_MAX_MB", "20")))
 LOG_KEEP = max(1, int(os.environ.get("QA_LOG_KEEP", "10")))
 
+# notifications: retry backoff and retention for rows that never deliver
+NOTIFY_TTL_DAYS = max(1, int(os.environ.get("QA_NOTIFY_TTL_DAYS", "14")))
+NOTIFY_BACKOFF_S = max(60, int(os.environ.get("QA_NOTIFY_BACKOFF_S", "300")))
+NOTIFY_BACKOFF_MAX_S = max(60, int(os.environ.get("QA_NOTIFY_BACKOFF_MAX_S", str(6 * 3600))))
+
 
 def ensure_dirs() -> None:
     for d in (

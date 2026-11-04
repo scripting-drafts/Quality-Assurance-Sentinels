@@ -18,9 +18,10 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import timedelta
 
 from . import config
-from .util import iso, sha256_text
+from .util import iso, parse_iso, sha256_text, utcnow
 
 APP = "qa-sentinels"
 
@@ -267,12 +268,19 @@ def collect(conn) -> dict:
     drafts = [dict(r) for r in conn.execute("SELECT * FROM ticket_drafts ORDER BY ts")]
     if drafts:
         digest = sha256_text("|".join(sorted(d["issue_key"] for d in drafts)))[:16]
+        key = f"drafts|{digest}"
+        # a newer digest supersedes older undelivered ones; otherwise every
+        # draft-set change during an outage leaves another stale digest queued
+        conn.execute(
+            "DELETE FROM notifications WHERE delivered=0 AND kind='draft' AND key<>?",
+            (key,),
+        )
         vendors = sorted({d["vendor"] for d in drafts})
         body = "\n".join(f"- {d['vendor']}: {d['title'][:110]}" for d in drafts[:8])
         if len(drafts) > 8:
             body += f"\n- … and {len(drafts) - 8} more"
         new += enqueue(
-            conn, "draft", f"drafts|{digest}",
+            conn, "draft", key,
             f"{len(drafts)} ticket draft(s) ready ({', '.join(vendors)})",
             body,
             detail=str(config.DRAFT_DIR),
@@ -306,24 +314,71 @@ def pending_count(conn) -> int:
     return conn.execute("SELECT COUNT(*) FROM notifications WHERE delivered=0").fetchone()[0]
 
 
+def _backoff_seconds(attempts: int) -> int:
+    step = max(1, min(int(attempts or 0), 8))
+    return min(config.NOTIFY_BACKOFF_S * (2 ** (step - 1)),
+               config.NOTIFY_BACKOFF_MAX_S)
+
+
+def _due_pending(conn, limit: int) -> list[dict]:
+    """Fair selection: unattempted and least-attempted rows first.
+
+    A dead backend must not pin the queue to its oldest rows, and a failing row
+    must not be retried every cycle; both would starve newer notifications.
+    """
+    rows = conn.execute(
+        "SELECT * FROM notifications WHERE delivered=0"
+        " ORDER BY attempts ASC, COALESCE(last_attempt,'') ASC, id ASC"
+    ).fetchall()
+    now = utcnow()
+    selected: list[dict] = []
+    for row in rows:
+        last = row["last_attempt"]
+        if last:
+            try:
+                if (now - parse_iso(last)).total_seconds() < _backoff_seconds(row["attempts"]):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        selected.append(dict(row))
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _purge(conn) -> None:
+    """Delivered rows age out; undelivered rows expire so keys can requeue."""
+    delivered = iso(utcnow() - timedelta(days=30))
+    pending = iso(utcnow() - timedelta(days=config.NOTIFY_TTL_DAYS))
+    conn.execute("DELETE FROM notifications WHERE delivered=1 AND ts < ?", (delivered,))
+    conn.execute("DELETE FROM notifications WHERE delivered=0 AND ts < ?", (pending,))
+
+
 def drain(conn, limit: int = 5) -> dict:
-    """Deliver queued notifications. Failures stay queued, never silently lost."""
+    """Deliver due notifications. Failures stay queued with backoff, never lost."""
     sent, failed = 0, []
-    for row in pending(conn, limit):
+    attempt_ts = iso()
+    for row in _due_pending(conn, limit):
         ok, why = send(
             row["title"], row["body"],
             urgency="critical" if row["kind"] == "correlation" else "normal",
             path=row.get("path"),
         )
         if ok:
-            conn.execute("UPDATE notifications SET delivered=1 WHERE id=?", (row["id"],))
+            conn.execute(
+                "UPDATE notifications SET delivered=1, attempts=attempts+1,"
+                " last_attempt=?, last_error=NULL WHERE id=?",
+                (attempt_ts, row["id"]),
+            )
             sent += 1
         else:
-            failed.append({"key": row["key"], "reason": why})
-    conn.execute(
-        "DELETE FROM notifications WHERE delivered=1"
-        " AND ts < datetime('now','-30 days')"
-    )
+            conn.execute(
+                "UPDATE notifications SET attempts=attempts+1,"
+                " last_attempt=?, last_error=? WHERE id=?",
+                (attempt_ts, why[:300], row["id"]),
+            )
+            failed.append({"key": row["key"], "reason": why, "attempts": row["attempts"] + 1})
+    _purge(conn)
     return {"sent": sent, "failed": failed, "pending": pending_count(conn)}
 
 

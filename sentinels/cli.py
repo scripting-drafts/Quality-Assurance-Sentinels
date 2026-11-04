@@ -362,6 +362,8 @@ def cmd_raise(args) -> int:
 def cmd_notify(args) -> int:
     with db.session() as conn:
         result = {}
+        ok, why = notify.available()
+        result["available"] = {"ok": ok, "detail": why}
         if args.test:
             ok, why = notify.send(
                 "QA sentinels", "Test notification from the sentinel", "normal"
@@ -375,6 +377,8 @@ def cmd_notify(args) -> int:
         conn.commit()
         print(json.dumps(result, indent=2))
         if result.get("test") and not result["test"]["ok"]:
+            return 1
+        if result.get("failed"):
             return 1
     return 0
 
@@ -487,7 +491,9 @@ def cmd_status(args) -> int:
         hc = holds.counts()
         print(f"  holds         : {hc['held_total']} held, {hc['held_installed']} installed"
               f"{' (GLOBAL HOLD)' if hc['mass_hold'] else ''}")
-        print(f"  notify        : {nd} undelivered; crosscheck: "
+        delivery_ok, delivery_why = notify.available()
+        delivery = "ready" if delivery_ok else f"unavailable: {delivery_why}"
+        print(f"  notify        : {nd} undelivered; delivery {delivery}; crosscheck: "
               f"{cc['ts'] + ' drift=' + str(cc['drift']) if cc else 'never'}")
         drows = conn.execute(
             "SELECT status, COUNT(*) n FROM deep_runs GROUP BY status"
@@ -956,7 +962,9 @@ def cmd_cycle(args) -> int:
 
         if _cycle_due(conn, "notify", config.CYCLE_CORRELATE_S):
             try:
-                result["notify"] = notify.drain(conn)
+                collected = notify.collect(conn)
+                drained = notify.drain(conn)
+                result["notify"] = {"collected": collected["queued"], **drained}
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 result["notify_error"] = str(exc)[:300]

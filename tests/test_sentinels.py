@@ -596,6 +596,159 @@ class LogRotationTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b"x" * 99)
 
 
+class NotificationFlowTests(unittest.TestCase):
+    """Queued notifications retry fairly, back off, and expire."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def _add(self, conn, key, ts=None):
+        from sentinels.util import iso
+
+        conn.execute(
+            "INSERT INTO notifications(ts,kind,key,title,body,delivered)"
+            " VALUES(?,?,?,?,?,0)",
+            (ts or iso(), "draft", key, key, "body"),
+        )
+
+    def _rows(self, conn):
+        return {r["key"]: dict(r) for r in conn.execute("SELECT * FROM notifications")}
+
+    def test_schema_carries_retry_bookkeeping(self):
+        conn = self._conn()
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
+        for name in ("attempts", "last_attempt", "last_error"):
+            self.assertIn(name, cols)
+
+    def test_failed_rows_back_off_while_fresh_rows_go_first(self):
+        from unittest import mock
+        from sentinels import notify
+
+        conn = self._conn()
+        for key in ("a", "b", "c"):
+            self._add(conn, key)
+        with mock.patch.object(notify, "send",
+                               side_effect=[(False, "no session"), (True, "sent")]):
+            first = notify.drain(conn, limit=2)
+        self.assertEqual(first["sent"], 1)
+        self.assertEqual([f["key"] for f in first["failed"]], ["a"])
+        self.assertEqual(first["failed"][0]["attempts"], 1)
+        rows = self._rows(conn)
+        self.assertEqual(rows["a"]["attempts"], 1)
+        self.assertEqual(rows["a"]["last_error"], "no session")
+        self.assertEqual(rows["b"]["delivered"], 1)
+
+        # c is unattempted and goes first; a is still inside its backoff window
+        with mock.patch.object(notify, "send", return_value=(True, "sent")):
+            second = notify.drain(conn, limit=2)
+        self.assertEqual(second["sent"], 1)
+        rows = self._rows(conn)
+        self.assertEqual(rows["c"]["delivered"], 1)
+        self.assertEqual(rows["a"]["delivered"], 0)
+
+    def test_row_retries_after_backoff_expires(self):
+        from datetime import timedelta
+        from unittest import mock
+        from sentinels import notify
+        from sentinels.util import iso, utcnow
+
+        conn = self._conn()
+        self._add(conn, "a")
+        conn.execute(
+            "UPDATE notifications SET attempts=1, last_attempt=? WHERE key='a'",
+            (iso(utcnow() - timedelta(seconds=notify._backoff_seconds(1) + 1)),),
+        )
+        with mock.patch.object(notify, "send", return_value=(True, "sent")):
+            result = notify.drain(conn)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(self._rows(conn)["a"]["delivered"], 1)
+
+    def test_undelivered_rows_expire(self):
+        from datetime import timedelta
+        from unittest import mock
+        from sentinels import config, notify
+        from sentinels.util import iso, utcnow
+
+        conn = self._conn()
+        old = iso(utcnow() - timedelta(days=config.NOTIFY_TTL_DAYS + 1))
+        self._add(conn, "old", ts=old)
+        self._add(conn, "new")
+        with mock.patch.object(notify, "send", return_value=(False, "dead")):
+            notify.drain(conn)
+        rows = self._rows(conn)
+        self.assertNotIn("old", rows)
+        self.assertIn("new", rows)
+
+    def test_new_draft_digest_supersedes_pending_ones(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import notify
+
+        conn = self._conn()
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS ticket_drafts ("
+            " id INTEGER PRIMARY KEY, ts TEXT, vendor TEXT, path TEXT,"
+            " title TEXT, issue_key TEXT UNIQUE)"
+        )
+        self._add(conn, "drafts|old")
+        conn.execute(
+            "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+            " VALUES('2026-11-04T00:00:00Z','nvidia','/tmp/d.md','d','k1')"
+        )
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(notify.config, "DRAFT_DIR", pathlib.Path(tmp)), \
+             mock.patch.object(notify, "_drafts_index", return_value=None), \
+             mock.patch("sentinels.correlate.aggregate", return_value=[]):
+            result = notify.collect(conn)
+        self.assertEqual(result["queued"], 1)
+        drafts = [r for r in conn.execute(
+            "SELECT * FROM notifications WHERE kind='draft' AND delivered=0"
+        )]
+        self.assertEqual(len(drafts), 1)
+        self.assertNotEqual(drafts[0]["key"], "drafts|old")
+
+    def test_crosscheck_key_depends_on_drift_composition(self):
+        from sentinels import crosscheck
+
+        stale = [{"issue_key": "a"}]
+        missing = [{"key": "b"}]
+        ready = []
+        first = crosscheck._drift_key(stale, missing, ready)
+        self.assertEqual(first, crosscheck._drift_key(stale, missing, ready))
+        self.assertNotEqual(first, crosscheck._drift_key(stale, missing, [{"key": "c"}]))
+
+    def test_notify_cli_fails_when_drain_has_failures(self):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from unittest import mock
+        from sentinels import cli, notify
+
+        conn = self._conn()
+        self._add(conn, "a")
+
+        @contextmanager
+        def session():
+            yield conn
+
+        import contextlib
+        import io
+
+        with mock.patch.object(cli.db, "session", session), \
+             mock.patch.object(notify, "available", return_value=(False, "no session")), \
+             mock.patch.object(notify, "collect", return_value={"queued": 0, "pending": 1}), \
+             mock.patch.object(notify, "send", return_value=(False, "no session")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.cmd_notify(SimpleNamespace(test=False, drain=True))
+        self.assertEqual(rc, 1)
+
+
 class HeldPackageTests(unittest.TestCase):
     """A crash in a held, outdated module may already be fixed upstream."""
 
@@ -1332,6 +1485,14 @@ class NotificationTraceCrosscheckTests(unittest.TestCase):
             result = notify.drain(conn)
         self.assertEqual(result["sent"], 0)
         self.assertEqual(notify.pending_count(conn), 1)
+        # the failure sets a backoff; move the clock past it to retry
+        from datetime import timedelta
+        from sentinels.util import iso, utcnow
+
+        conn.execute(
+            "UPDATE notifications SET last_attempt=?",
+            (iso(utcnow() - timedelta(seconds=notify._backoff_seconds(1) + 1)),),
+        )
         with mock.patch.object(notify, "send", return_value=(True, "sent")):
             result = notify.drain(conn)
         self.assertEqual(result["sent"], 1)

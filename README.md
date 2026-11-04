@@ -32,8 +32,10 @@ The supported entry point is the single interactive installer. It asks which lay
 
 ```bash
 ./install.sh              # interactive: layer 1 (phase 1) and/or layer 2 (phase 2)
-./install.sh --dry-run    # show the plan without changing anything
+./install.sh --dry-run    # show the plan and commands without changing anything
 ```
+
+To remove installed hooks and compiled binaries while keeping collected history (`var/`, `journal/`, `evidence/`, `tickets/`, `triage/`), run `./uninstall.sh`; add `--purge-data` for a clean slate first.
 
 Layer 1 is optional and covers the routine monitor; layer 2 adds deep tracing. The explicit commands below remain useful for manual or partial installs.
 

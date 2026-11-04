@@ -4,7 +4,7 @@ All commands use `./bin/qa <command>` from the repository root.
 
 | Area | Commands | What they do |
 | --- | --- | --- |
-| Setup and operations | `install.sh`, `init`, `preflight`, `status`, `install-cron`, `posture` | Install one or both layers, initialize, inspect prerequisites, check scheduling and security posture |
+| Setup and operations | `install.sh`, `uninstall.sh`, `init`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, inspect prerequisites, check scheduling and security posture |
 | Routine collection | `tick` (`phase1`), `sample`, `ingest`, `inventory`, `report` | Capture and summarize system state |
 | Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, events, their relationships, and held/outdated packages |
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |

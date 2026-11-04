@@ -408,6 +408,50 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(nothing.returncode, 2)
         self.assertIn("nothing selected", nothing.stderr)
 
+    def test_uninstaller_keeps_gathered_data_by_default(self):
+        import os
+        import subprocess
+        from sentinels import config
+
+        script = config.ROOT / "uninstall.sh"
+        text = script.read_text()
+        self.assertIn('dirname "${BASH_SOURCE[0]}")"', text)
+        self.assertNotIn('BASH_SOURCE[0]}")/..', text)
+        for needle in ("--dry-run", "--keep-build", "--purge-data", "--yes",
+                       "will keep", "config/identity.env"):
+            self.assertIn(needle, text)
+        self.assertTrue(os.access(script, os.X_OK))
+        check = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+        sampler = config.BIN / "qa_sample"
+        existed = sampler.exists()
+        proc = subprocess.run(
+            [str(script), "--dry-run", "--yes"],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("will keep", proc.stdout)
+        self.assertIn("var/", proc.stdout)
+        self.assertIn("dry run complete", proc.stdout)
+        self.assertIn("nothing was removed", proc.stdout)
+        self.assertEqual(sampler.exists(), existed)
+
+    def test_uninstaller_refuses_to_purge_without_confirmation(self):
+        import subprocess
+        from sentinels import config
+
+        names = ("var", "journal", "evidence", "tickets", "triage")
+        before = {name: (config.ROOT / name).exists() for name in names}
+        proc = subprocess.run(
+            [str(config.ROOT / "uninstall.sh"), "--purge-data"],
+            input="no\n", capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("aborted; no data was deleted", proc.stderr)
+        for name in names:
+            self.assertEqual((config.ROOT / name).exists(), before[name])
+
     def test_privilege_failure_markers(self):
         from sentinels.cli import _privilege_failure
 

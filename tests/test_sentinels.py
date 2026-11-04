@@ -547,6 +547,55 @@ class CycleTests(unittest.TestCase):
         self.assertNotIn("ExecStart=$ROOT/bin/qa tick", script)
 
 
+class LogRotationTests(unittest.TestCase):
+    """cron.log must stay bounded without breaking the live viewer."""
+
+    def test_policy_defaults_stay_within_the_agreed_budget(self):
+        from sentinels import config
+
+        self.assertGreaterEqual(config.LOG_MAX_MB, 10)
+        self.assertLessEqual(config.LOG_MAX_MB, 25)
+        self.assertGreaterEqual(config.LOG_KEEP, 10)
+        self.assertLessEqual(config.LOG_KEEP, 20)
+        self.assertLessEqual(config.LOG_MAX_MB * config.LOG_KEEP, 500)
+
+    def test_rotation_copies_truncates_and_drops_the_oldest(self):
+        import pathlib
+        import tempfile
+        from sentinels import logs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "cron.log"
+            path.write_bytes(b"a" * 200)
+            result = logs.rotate(path=path, max_bytes=100, keep=2)
+            self.assertEqual(result["bytes"], 200)
+            self.assertEqual(path.read_bytes(), b"")
+            self.assertEqual((path.parent / "cron.log.1").read_bytes(), b"a" * 200)
+
+            path.write_bytes(b"b" * 200)
+            logs.rotate(path=path, max_bytes=100, keep=2)
+            self.assertEqual((path.parent / "cron.log.1").read_bytes(), b"b" * 200)
+            self.assertEqual((path.parent / "cron.log.2").read_bytes(), b"a" * 200)
+
+            path.write_bytes(b"c" * 200)
+            logs.rotate(path=path, max_bytes=100, keep=2)
+            self.assertEqual((path.parent / "cron.log.1").read_bytes(), b"c" * 200)
+            self.assertEqual((path.parent / "cron.log.2").read_bytes(), b"b" * 200)
+            self.assertFalse((path.parent / "cron.log.3").exists())
+
+    def test_small_or_missing_log_is_left_alone(self):
+        import pathlib
+        import tempfile
+        from sentinels import logs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "cron.log"
+            self.assertEqual(logs.rotate(path=path, max_bytes=100, keep=2), {})
+            path.write_bytes(b"x" * 99)
+            self.assertEqual(logs.rotate(path=path, max_bytes=100, keep=2), {})
+            self.assertEqual(path.read_bytes(), b"x" * 99)
+
+
 class HeldPackageTests(unittest.TestCase):
     """A crash in a held, outdated module may already be fixed upstream."""
 

@@ -18,6 +18,9 @@ environment variable read by `bin/qa`.
 - `QA_CYCLE_RAISE_S=3600` — ticket raise-gate re-triage cadence.
 - `QA_CYCLE_CROSSCHECK_S=21600` — crosscheck cadence.
 - `QA_CYCLE_DAILY_HOUR=8` — earliest local hour for the daily report.
+- `QA_LOG_MAX_MB=20`, `QA_LOG_KEEP=10` — `var/cron.log` rotates by
+  copytruncate at the size cap and keeps that many numbered copies (200 MiB
+  total by default).
 - eBPF is used when `bin/qa_ebpf` is built and layer 2 has `CAP_BPF`; otherwise
   layer 2 records `eBPF: unavailable` and continues with ftrace/perf.
 - `QA_PSI_MEMORY_FULL_ALERT=10`, `QA_MEM_AVAILABLE_ALERT_PCT=5`,

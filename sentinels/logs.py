@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 from . import config
 
@@ -79,6 +81,40 @@ def tail_lines(path, n: int) -> list[str]:
             return list(deque(fh, maxlen=max(1, n)))
     except OSError:
         return []
+
+
+def rotate(path=None, max_bytes: int | None = None, keep: int | None = None) -> dict:
+    """Copy-and-truncate the execution log when it reaches the size cap.
+
+    cron opens ``var/cron.log`` with ``>>`` for each run and closes it when the
+    run ends, so a copytruncate rotation is safe. It also keeps the live viewer
+    working: ``follow()`` reopens the file when its size drops below the read
+    offset. Rotation happens before a cycle writes its own output, which keeps
+    the copy window to milliseconds.
+    """
+    target = Path(path or (config.VAR / "cron.log"))
+    cap = config.LOG_MAX_MB * 1024 * 1024 if max_bytes is None else max_bytes
+    copies = config.LOG_KEEP if keep is None else max(1, int(keep))
+    try:
+        size = target.stat().st_size
+    except OSError:
+        return {}
+    if size < cap:
+        return {}
+
+    oldest = target.with_name(f"{target.name}.{copies}")
+    if oldest.exists():
+        oldest.unlink()
+    for index in range(copies - 1, 0, -1):
+        source = target.with_name(f"{target.name}.{index}")
+        if source.exists():
+            source.rename(target.with_name(f"{target.name}.{index + 1}"))
+
+    backup = target.with_name(f"{target.name}.1")
+    shutil.copyfile(target, backup)
+    with target.open("w", encoding="utf-8"):
+        pass
+    return {"path": str(target), "backup": str(backup), "bytes": size, "keep": copies}
 
 
 def header(conn) -> list[str]:

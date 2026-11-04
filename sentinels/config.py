@@ -82,6 +82,11 @@ SAMPLE_RETENTION_DAYS = int(os.environ.get("QA_SAMPLE_RETENTION_DAYS", "7"))
 PROC_RETENTION_DAYS = int(os.environ.get("QA_PROC_RETENTION_DAYS", "3"))
 INVENTORY_RETENTION_DAYS = int(os.environ.get("QA_INVENTORY_RETENTION_DAYS", "90"))
 
+# execution-log rotation: copytruncate at the cap and keep a bounded set, so
+# var/cron.log cannot grow without limit or rotate into thousands of tiny files
+LOG_MAX_MB = max(1, int(os.environ.get("QA_LOG_MAX_MB", "20")))
+LOG_KEEP = max(1, int(os.environ.get("QA_LOG_KEEP", "10")))
+
 
 def ensure_dirs() -> None:
     for d in (

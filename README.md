@@ -78,6 +78,8 @@ make -C src install
 ./bin/qa preflight             # Check prerequisites and access
 ```
 
+`var/cron.log` rotates by copytruncate at `QA_LOG_MAX_MB` (default 20 MiB) and keeps `QA_LOG_KEEP` numbered files (default 10), so `qa logs --follow` survives rotation. Force a rotation with `./bin/qa logs --rotate`.
+
 To remove the user cron entries installed by this project:
 
 ```bash

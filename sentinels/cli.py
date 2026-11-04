@@ -402,6 +402,9 @@ def cmd_logs(args) -> int:
     if args.install_autostart:
         print(json.dumps(logs.install_autostart(), indent=2))
         return 0
+    if args.rotate:
+        print(json.dumps(logs.rotate(), indent=2))
+        return 0
     color = (not args.no_color) and (args.force_color or logs.supports_color())
     path = config.VAR / "cron.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -746,6 +749,12 @@ def cmd_cycle(args) -> int:
     config.ensure_dirs()
     result: dict = {"ts": iso()}
     failed = 0
+    try:
+        rotated = logs.rotate()
+        if rotated:
+            result["log_rotated"] = rotated
+    except OSError as exc:  # noqa: BLE001 - a log rotation must not stop a cycle
+        result["log_rotate_error"] = str(exc)[:200]
     with db.session() as conn:
         prev_boot = db.meta_get(conn, "last_boot_id")
         try:
@@ -1073,6 +1082,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force-color", action="store_true")
     s.add_argument("--install-autostart", action="store_true",
                    help="open this monitor in a terminal at login")
+    s.add_argument("--rotate", action="store_true",
+                   help="rotate var/cron.log now if it reached the size cap")
     s.set_defaults(func=cmd_logs)
 
     s = sub.add_parser("triage", help="core-2 side queue: refresh/list/update cases")

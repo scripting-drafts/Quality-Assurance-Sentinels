@@ -10,7 +10,7 @@ All commands use `./bin/qa <command>` from the repository root.
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |
 | Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports |
 | Deep diagnostics | `deploy-layer2` (`deploy-phase2` legacy), `deep` | Configure and run queued tracing |
-| Monitoring display | `logs` | Read or follow timestamped activity |
+| Monitoring display | `logs` | Read, rotate or follow timestamped activity |
 
 Useful examples:
 
@@ -19,6 +19,7 @@ Useful examples:
 ./bin/qa crosscheck --deep
 ./bin/qa notify --test
 ./bin/qa logs --install-autostart
+./bin/qa logs --rotate
 ./bin/qa tickets --list
 ```
 

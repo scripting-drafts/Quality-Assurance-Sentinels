@@ -11,17 +11,17 @@ environment variable read by `bin/qa`.
 - `QA_EVIDENCE_EVENT_LIMIT=0` — put every event in an evidence bundle.
 - `QA_INVENTORY_INTERVAL_S=10800` — base inventory period.
 - `QA_INVENTORY_MIN_S=900`, `QA_INVENTORY_MAX_S=43200` — adaptive floor/ceiling.
-- `QA_DEEP_AUTO=1` — queue phase-2 tracing for critical phase-1 findings.
+- `QA_DEEP_AUTO=1` — queue layer-2 tracing for critical layer-1 findings.
 - `QA_DEEP_DURATION_S=30`, `QA_DEEP_MAX_DURATION_S=120` — trace window.
 - `QA_DEEP_REQUEST_COOLDOWN_S=1800` — minimum gap per finding.
 - `QA_CYCLE_CORRELATE_S=300` — correlation refresh and notification drain cadence.
 - `QA_CYCLE_RAISE_S=3600` — ticket raise-gate re-triage cadence.
 - `QA_CYCLE_CROSSCHECK_S=21600` — crosscheck cadence.
 - `QA_CYCLE_DAILY_HOUR=8` — earliest local hour for the daily report.
-- eBPF is used when `bin/qa_ebpf` is built and phase 2 has `CAP_BPF`; otherwise
-  phase 2 records `eBPF: unavailable` and continues with ftrace/perf.
+- eBPF is used when `bin/qa_ebpf` is built and layer 2 has `CAP_BPF`; otherwise
+  layer 2 records `eBPF: unavailable` and continues with ftrace/perf.
 - `QA_PSI_MEMORY_FULL_ALERT=10`, `QA_MEM_AVAILABLE_ALERT_PCT=5`,
-  `QA_TEMP_ALERT_C=90`, `QA_IO_PRESSURE_ALERT=50` — phase-1 thresholds.
+  `QA_TEMP_ALERT_C=90`, `QA_IO_PRESSURE_ALERT=50` — layer-1 thresholds.
 - `QA_MIN_FREE_MIB=1024` — last-resort disk guard; ingestion pauses below it so
   the QA job cannot fill the disk and become the outage.
 

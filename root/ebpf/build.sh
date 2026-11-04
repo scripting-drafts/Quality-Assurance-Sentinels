@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the phase-2 eBPF tracer.
+# Build the layer-2 eBPF tracer.
 #
 # Preferred: system clang + libbpf-dev.
 # Fallback: the user-local toolchain created by bootstrap-ebpf.sh (no root).

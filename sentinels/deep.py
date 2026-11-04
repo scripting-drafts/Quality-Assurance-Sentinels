@@ -1,6 +1,6 @@
-"""Phase 2: deep, root-level investigation.
+"""Layer 2: deep, root-level investigation.
 
-Phase 1 writes a small JSON request when a finding is severe enough. A systemd
+Layer 1 writes a small JSON request when a finding is severe enough. A systemd
 path unit (installed by root/install-system.sh) runs `qa deep --consume` with
 CAP_SYS_ADMIN/CAP_PERFMON, so tracing is real but still not a root shell.
 

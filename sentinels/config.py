@@ -32,7 +32,7 @@ INVENTORY_MIN_S = int(os.environ.get("QA_INVENTORY_MIN_S", "900"))
 INVENTORY_MAX_S = int(os.environ.get("QA_INVENTORY_MAX_S", str(12 * 3600)))
 INVENTORY_EVENT_GAP_S = int(os.environ.get("QA_INVENTORY_EVENT_GAP_S", "300"))
 
-# two-phase operation
+# two-layer operation
 DEEP_DURATION_S = int(os.environ.get("QA_DEEP_DURATION_S", "30"))
 DEEP_MAX_DURATION_S = int(os.environ.get("QA_DEEP_MAX_DURATION_S", "120"))
 DEEP_AUTO = os.environ.get("QA_DEEP_AUTO", "1").lower() in ("1", "yes", "true", "on")

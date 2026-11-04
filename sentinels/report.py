@@ -397,7 +397,7 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
     }
     body += [
         "",
-        "## Phase 1 — real-time detection",
+        "## Layer 1 — real-time detection",
         "",
         f"- Open findings: **{sum(fcounts.values())}** {fcounts or ''}",
     ]
@@ -411,7 +411,7 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
                 f"{row['count']} | {detail} |"
             )
     else:
-        body.append("_No open phase-1 findings._")
+        body.append("_No open layer-1 findings._")
 
     deep_rows = [
         dict(r) for r in conn.execute(
@@ -420,7 +420,7 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
     ]
     body += [
         "",
-        "## Phase 2 — deep investigation",
+        "## Layer 2 — deep investigation",
         "",
         f"- Pending requests: **{len(deep.pending_requests())}** "
         f"(`triage/core2/deep-requests/`)",
@@ -441,8 +441,8 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
                 f"`{row['path']}` |"
             )
     else:
-        body.append("_No deep runs yet. Phase 1 queues one for critical findings; "
-                    "install the phase-2 path unit with `sudo root/install-system.sh`._")
+        body.append("_No deep runs yet. Layer 1 queues one for critical findings; "
+                    "install the layer-2 path unit with `sudo root/install-system.sh`._")
 
     body += ["", "## Inventory (every ~3 h)", ""]
     if inv:

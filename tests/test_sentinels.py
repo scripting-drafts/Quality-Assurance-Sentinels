@@ -210,7 +210,7 @@ class PostureTests(unittest.TestCase):
         self.assertIsInstance(data["baseline_changed"], list)
 
 
-class PhaseTests(unittest.TestCase):
+class LayerTests(unittest.TestCase):
     def _conn(self):
         import sqlite3
         from sentinels import db
@@ -220,7 +220,7 @@ class PhaseTests(unittest.TestCase):
         conn.executescript(db.SCHEMA)
         return conn
 
-    def test_phase1_rules_find_crash_event_and_resource_pressure(self):
+    def test_layer1_rules_find_crash_event_and_resource_pressure(self):
         import json
         from sentinels import detect
 
@@ -248,7 +248,7 @@ class PhaseTests(unittest.TestCase):
                          "memory.pressure", "io.pressure", "thermal.high"):
             self.assertIn(expected, rules)
 
-    def test_phase1_dedupes_repeated_findings(self):
+    def test_layer1_dedupes_repeated_findings(self):
         from sentinels import detect
 
         conn = self._conn()
@@ -275,7 +275,7 @@ class PhaseTests(unittest.TestCase):
         self.assertGreater(summary["core2_event_pct"], 60)
         self.assertEqual(summary["top_core2_comms"][0][0], "firefox")
 
-    def test_phase2_reports_privilege_honestly(self):
+    def test_layer2_reports_privilege_honestly(self):
         from sentinels import deep
 
         priv = deep.privilege()
@@ -378,21 +378,21 @@ class DeploymentTests(unittest.TestCase):
             capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(both.returncode, 0, both.stderr)
-        self.assertIn("layer 1 (phase 1): build sampler", both.stdout)
-        self.assertIn("layer 2 (phase 2): deep-trace", both.stdout)
+        self.assertIn("layer 1: build sampler", both.stdout)
+        self.assertIn("layer 2: deep-trace", both.stdout)
         self.assertIn("   $ make -C src install", both.stdout)
-        self.assertIn("   $ ./bin/qa deploy-phase2", both.stdout)
+        self.assertIn("   $ ./bin/qa deploy-layer2", both.stdout)
         self.assertIn("   $ ./bin/qa install-cron", both.stdout)
         self.assertIn("dry run complete", both.stdout)
         self.assertIn("not executed", both.stdout)
 
-        phase2_only = subprocess.run(
+        layer2_only = subprocess.run(
             [script, "--dry-run", "--yes", "--no-layer1", "--layer2"],
             capture_output=True, text=True, timeout=60,
         )
-        self.assertEqual(phase2_only.returncode, 0, phase2_only.stderr)
-        self.assertIn("layer 1 (phase 1): skipped", phase2_only.stdout)
-        self.assertIn("   $ ./bin/qa deploy-phase2", phase2_only.stdout)
+        self.assertEqual(layer2_only.returncode, 0, layer2_only.stderr)
+        self.assertIn("layer 1: skipped", layer2_only.stdout)
+        self.assertIn("   $ ./bin/qa deploy-layer2", layer2_only.stdout)
 
         systemd = subprocess.run(
             [script, "--dry-run", "--yes", "--layer1", "--no-layer2", "--systemd"],
@@ -407,6 +407,14 @@ class DeploymentTests(unittest.TestCase):
         )
         self.assertEqual(nothing.returncode, 2)
         self.assertIn("nothing selected", nothing.stderr)
+
+    def test_deploy_layer2_keeps_the_phase_alias(self):
+        from sentinels import cli
+
+        parser = cli.build_parser()
+        for name in ("deploy-layer2", "deploy-phase2"):
+            args = parser.parse_args([name, "--check"])
+            self.assertIs(args.func, cli.cmd_deploy_layer2)
 
     def test_uninstaller_keeps_gathered_data_by_default(self):
         import os
@@ -486,7 +494,7 @@ class CycleTests(unittest.TestCase):
         from sentinels import cli
 
         parser = cli.build_parser()
-        for name in ("cycle", "tick", "phase1"):
+        for name in ("cycle", "tick", "layer1", "phase1"):
             args = parser.parse_args([name])
             self.assertIs(args.func, cli.cmd_cycle, name)
 

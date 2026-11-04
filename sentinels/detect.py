@@ -1,8 +1,8 @@
-"""Phase 1: real-time bug detection and evidence escalation.
+"""Layer 1: real-time bug detection and evidence escalation.
 
 Cheap rules run on every tick over new crashes, new journal events and the
 latest kernel/memory/CPU sample. Findings are deduplicated and stored so the
-deep phase (phase 2) can be triggered deliberately, not blindly.
+deep layer (layer 2) can be triggered deliberately, not blindly.
 """
 from __future__ import annotations
 
@@ -195,7 +195,7 @@ def _sample_findings(conn) -> list[dict]:
 
 
 def scan(conn, hours: int = 24) -> list[dict]:
-    """Run phase-1 rules; return only newly created findings."""
+    """Run layer-1 rules; return only newly created findings."""
     last = db.meta_get(conn, "last_finding_scan")
     now = utcnow()
     since = (
@@ -219,7 +219,7 @@ def scan(conn, hours: int = 24) -> list[dict]:
 
 
 def queue_escalations(conn, findings: list[dict], cooldown_s: int | None = None) -> list[str]:
-    """Queue phase-2 deep runs for critical findings, respecting a cooldown."""
+    """Queue layer-2 deep runs for critical findings, respecting a cooldown."""
     from . import deep
 
     cooldown = config.DEEP_REQUEST_COOLDOWN_S if cooldown_s is None else cooldown_s
@@ -227,7 +227,7 @@ def queue_escalations(conn, findings: list[dict], cooldown_s: int | None = None)
     for finding in findings:
         if finding["severity"] != "critical" or not config.DEEP_AUTO:
             continue
-        # phase 2 traces a live process; a boot that already ended cannot be traced
+        # layer 2 traces a live process; a boot that already ended cannot be traced
         if finding["rule"].startswith("boot."):
             continue
         key = "deep_req|" + finding["fingerprint"]

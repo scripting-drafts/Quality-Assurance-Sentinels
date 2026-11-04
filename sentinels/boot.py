@@ -1,6 +1,6 @@
 """Boot boundary sentinel: classify why the previous boot ended.
 
-Phase 1 samples a running system, so it is blind to the moment a machine stops
+Layer 1 samples a running system, so it is blind to the moment a machine stops
 writing. This layer runs at the next boot and answers one question per boot:
 did a shutdown sequence complete, or did the machine simply stop?
 
@@ -278,7 +278,7 @@ def scan_counts(row: dict) -> dict:
 
 
 def findings(conn, since: str) -> list[dict]:
-    """Phase-1 findings for boot boundaries that did not close cleanly."""
+    """Layer-1 findings for boot boundaries that did not close cleanly."""
     out = []
     for row in conn.execute(
         "SELECT * FROM boots WHERE ended_clean=0"

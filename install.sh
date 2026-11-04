@@ -2,16 +2,16 @@
 # Single installer for qa-sentinels.
 #
 # Two layers can be added independently:
-#   layer 1 (phase 1)  collection: build the sampler, initialise the store,
+#   layer 1  collection: build the sampler, initialise the store,
 #                      run one cycle, and schedule it (cron or systemd timer)
-#   layer 2 (phase 2)  deep diagnostics: eBPF tracer and the systemd path unit
+#   layer 2  deep diagnostics: eBPF tracer and the systemd path unit
 #                      that consumes queued deep-trace requests
 #
 # Run without arguments for an interactive install.
 #
 # Usage: ./install.sh [options]
-#   --layer1 / --no-layer1  add / skip layer 1 (phase 1, optional)
-#   --layer2 / --no-layer2  add / skip layer 2 (phase 2)
+#   --layer1 / --no-layer1  add / skip layer 1 (optional)
+#   --layer2 / --no-layer2  add / skip layer 2
 #   --systemd               schedule layer 1 with a systemd timer (needs sudo)
 #   --keep-cron             with --systemd, leave the existing user cron block
 #   --skip-ebpf             deploy layer 2 without building the eBPF tracer
@@ -88,7 +88,7 @@ echo "  root: $ROOT"
 echo
 
 if [[ -z "$LAYER1" ]]; then
-  if ask "Add layer 1 (phase 1: collection and scheduling)?" y; then
+  if ask "Add layer 1 (collection and scheduling)?" y; then
     LAYER1=1
   else
     LAYER1=0
@@ -104,7 +104,7 @@ if [[ $LAYER1 -eq 1 && -z "$SCHEDULE" ]]; then
 fi
 
 if [[ -z "$LAYER2" ]]; then
-  if ask "Add layer 2 (phase 2: deep trace and eBPF)?" y; then
+  if ask "Add layer 2 (deep trace and eBPF)?" y; then
     LAYER2=1
   else
     LAYER2=0
@@ -137,8 +137,8 @@ fi
 
 echo
 echo "plan"
-echo "  layer 1 (phase 1): $layer1_plan"
-echo "  layer 2 (phase 2): $layer2_plan"
+echo "  layer 1: $layer1_plan"
+echo "  layer 2: $layer2_plan"
 echo
 
 if [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 ]]; then
@@ -152,7 +152,7 @@ run() {
 
 # ---------------------------------------------------------------- layer 1
 if [[ $LAYER1 -eq 1 ]]; then
-  echo "== layer 1 (phase 1): collection"
+  echo "== layer 1: collection"
   run make -C src install
   run ./bin/qa init
   run ./bin/qa cycle
@@ -160,17 +160,17 @@ fi
 
 # ---------------------------------------------------------------- layer 2
 if [[ $LAYER2 -eq 1 ]]; then
-  echo "== layer 2 (phase 2): deep trace"
+  echo "== layer 2: deep trace"
   deep_args=("${USER_ARGS[@]}")
   [[ $SKIP_EBPF -eq 1 ]] && deep_args+=(--skip-ebpf)
-  run ./bin/qa deploy-phase2 "${deep_args[@]}"
+  run ./bin/qa deploy-layer2 "${deep_args[@]}"
 else
-  echo "== layer 2 (phase 2): skipped"
+  echo "== layer 2: skipped"
 fi
 
 # ---------------------------------------------------------------- scheduling
 if [[ $LAYER1 -eq 1 && "$SCHEDULE" == "systemd" ]]; then
-  echo "== layer 1 (phase 1): systemd timer"
+  echo "== layer 1: systemd timer"
   install_args=("${USER_ARGS[@]}")
   [[ $KEEP_CRON -eq 0 ]] && install_args+=(--takeover)
   if [[ ${EUID} -eq 0 ]]; then
@@ -181,7 +181,7 @@ if [[ $LAYER1 -eq 1 && "$SCHEDULE" == "systemd" ]]; then
     die "need sudo to install the system timer; rerun as root"
   fi
 elif [[ $LAYER1 -eq 1 ]]; then
-  echo "== layer 1 (phase 1): cron"
+  echo "== layer 1: cron"
   run ./bin/qa install-cron
 else
   echo "== layer 1 skipped: nothing schedules the one-minute cycle"

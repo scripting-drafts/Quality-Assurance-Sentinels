@@ -6,25 +6,25 @@
 # journal groups, so coredumps and hardware probes work while the database stays
 # owned by the operator.
 #
-# Usage: sudo ./root/install-system.sh [--takeover] [--phase2-only] [--user NAME]
+# Usage: sudo ./root/install-system.sh [--takeover] [--layer2-only] [--user NAME]
 #   --takeover    remove the user cron block so only the system timer runs.
-#   --phase2-only install only the deep-trace path/service and keep cron.
+#   --layer2-only install only the deep-trace path/service and keep cron.
 #   --user NAME   operator account for the unit (default: SUDO_USER/PKEXEC_UID/owner).
 set -euo pipefail
 
 if [[ ${EUID} -ne 0 ]]; then
-  echo "run with: sudo $0 [--takeover] [--phase2-only] [--user NAME]" >&2
+  echo "run with: sudo $0 [--takeover] [--layer2-only] [--user NAME]" >&2
   exit 1
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 USER_NAME="${QA_SENTINEL_USER:-}"
 TAKEOVER=0
-PHASE2_ONLY=0
+LAYER2_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --takeover) TAKEOVER=1 ;;
-    --phase2-only) PHASE2_ONLY=1 ;;
+    --layer2-only|--phase2-only) LAYER2_ONLY=1 ;;
     --user)
       USER_NAME="${2:-}"
       [[ -n "$USER_NAME" ]] || { echo "--user needs a name" >&2; exit 2; }
@@ -69,7 +69,7 @@ TIMER=/etc/systemd/system/qa-sentinel.timer
 DEEP_SERVICE=/etc/systemd/system/qa-sentinel-deep.service
 DEEP_PATH=/etc/systemd/system/qa-sentinel-deep.path
 
-if [[ $PHASE2_ONLY -eq 0 ]]; then
+if [[ $LAYER2_ONLY -eq 0 ]]; then
 cat >"$SERVICE" <<EOF
 [Unit]
 Description=qa-sentinels layer-1 routine cycle
@@ -122,7 +122,7 @@ fi
 
 cat >"$DEEP_SERVICE" <<EOF
 [Unit]
-Description=qa-sentinels phase-2 deep trace (tracefs + perf)
+Description=qa-sentinels layer-2 deep trace (tracefs + perf)
 Documentation=file://$ROOT/README.md
 After=local-fs.target
 
@@ -153,7 +153,7 @@ EOF
 
 cat >"$DEEP_PATH" <<EOF
 [Unit]
-Description=Trigger qa-sentinels phase-2 deep trace on queued requests
+Description=Trigger qa-sentinels layer-2 deep trace on queued requests
 Documentation=file://$ROOT/README.md
 
 [Path]
@@ -176,15 +176,15 @@ if [[ ! -x "$ROOT/bin/qa_ebpf" ]]; then
   echo "  $ROOT/root/ebpf/bootstrap-ebpf.sh && $ROOT/root/ebpf/build.sh"
 fi
 
-if [[ $PHASE2_ONLY -eq 0 ]]; then
+if [[ $LAYER2_ONLY -eq 0 ]]; then
   echo "installed qa-sentinel.timer and qa-sentinel-deep.path"
 else
-  echo "installed qa-sentinel-deep.path (phase 2 only; existing cron kept)"
+  echo "installed qa-sentinel-deep.path (layer 2 only; existing cron kept)"
 fi
 echo "  user    : $USER_NAME (not root)"
-echo "  caps    : phase1 read-only; phase2 adds sys-admin/perfmon for tracefs"
+echo "  caps    : layer 1 read-only; layer 2 adds sys-admin/perfmon for tracefs"
 echo "  root    : $ROOT"
-if [[ $PHASE2_ONLY -eq 0 ]]; then
+if [[ $LAYER2_ONLY -eq 0 ]]; then
   systemctl --no-pager --lines=0 status qa-sentinel.timer qa-sentinel-deep.path || true
   echo "verify with: systemctl list-timers qa-sentinel.timer; $ROOT/bin/qa status"
 else

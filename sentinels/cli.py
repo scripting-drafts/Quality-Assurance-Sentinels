@@ -234,7 +234,7 @@ def cmd_deep(args) -> int:
                   f"(need CAP_SYS_ADMIN + CAP_PERFMON)")
             print("run one of:")
             print(f"  sudo {config.BIN / 'qa'} deep --consume")
-            print(f"  bin/qa deploy-phase2   # installs the phase-2 path unit")
+            print(f"  bin/qa deploy-layer2   # installs the layer-2 path unit")
             return 0
 
         result = deep.run_request(
@@ -463,7 +463,7 @@ def cmd_status(args) -> int:
             "SELECT severity, COUNT(*) n FROM findings WHERE status='open' GROUP BY severity"
         ).fetchall()
         fsum = ", ".join(f"{r['severity']}={r['n']}" for r in fcounts) or "none"
-        print(f"  phase1        : open findings: {fsum}")
+        print(f"  layer1        : open findings: {fsum}")
         bcounts = conn.execute(
             "SELECT COUNT(*) n,"
             " COALESCE(SUM(CASE WHEN ended_clean=0 THEN 1 ELSE 0 END),0) u FROM boots"
@@ -490,9 +490,9 @@ def cmd_status(args) -> int:
             "SELECT status, COUNT(*) n FROM deep_runs GROUP BY status"
         ).fetchall()
         dsum = ", ".join(f"{r['status']}={r['n']}" for r in drows) or "none"
-        p2 = _phase2_state()
+        p2 = _layer2_state()
         print(
-            f"  phase2        : deep runs: {dsum}; "
+            f"  layer2        : deep runs: {dsum}; "
             f"pending requests: {len(deep.pending_requests())}; "
             f"path unit: {'armed' if p2['deployed'] else 'not deployed'}"
         )
@@ -536,19 +536,19 @@ def cmd_preflight(args) -> int:
         print(f"[{'ok' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail and not ok else ""))
         failed += 0 if ok else 1
     priv = deep.privilege()
-    state = _phase2_state()
+    state = _layer2_state()
     if priv["ok"]:
-        phase2 = "ready"
+        layer2 = "ready"
     elif state["deployed"]:
-        phase2 = "armed via qa-sentinel-deep.path (shell itself unprivileged)"
+        layer2 = "armed via qa-sentinel-deep.path (shell itself unprivileged)"
     elif state["active"]:
-        phase2 = f"path unit is active but not for {config.ROOT}; run: bin/qa deploy-phase2 --force"
+        layer2 = f"path unit is active but not for {config.ROOT}; run: bin/qa deploy-layer2 --force"
     else:
-        phase2 = (
+        layer2 = (
             f"not privileged (euid={priv['euid']}, CapEff={priv['cap_eff']}); "
-            "arm with: bin/qa deploy-phase2"
+            "arm with: bin/qa deploy-layer2"
         )
-    print(f"[info] phase-2 tracing: {phase2}")
+    print(f"[info] layer-2 tracing: {layer2}")
     print(
         "[info] eBPF tracer: "
         + ("built" if (config.BIN / "qa_ebpf").exists() else
@@ -561,7 +561,7 @@ DEEP_SERVICE_UNIT = pathlib.Path("/etc/systemd/system/qa-sentinel-deep.service")
 DEEP_PATH_UNIT = pathlib.Path("/etc/systemd/system/qa-sentinel-deep.path")
 
 
-def _phase2_state() -> dict:
+def _layer2_state() -> dict:
     root = config.ROOT
     service = read_text(DEEP_SERVICE_UNIT)
     path_unit = read_text(DEEP_PATH_UNIT)
@@ -587,8 +587,8 @@ def _privilege_failure(stderr: str) -> bool:
     )
 
 
-def _run_phase2_installer(user: str | None = None) -> tuple[int, str, str]:
-    cmd = [str(config.ROOT / "root" / "install-system.sh"), "--phase2-only"]
+def _run_layer2_installer(user: str | None = None) -> tuple[int, str, str]:
+    cmd = [str(config.ROOT / "root" / "install-system.sh"), "--layer2-only"]
     if user:
         cmd += ["--user", user]
     if os.geteuid() == 0:
@@ -648,11 +648,11 @@ def _ensure_ebpf(skip: bool) -> tuple[bool, str]:
     return False, (err2 or out2 or err or out).strip()[-300:]
 
 
-def cmd_deploy_phase2(args) -> int:
+def cmd_deploy_layer2(args) -> int:
     if args.check:
-        state = _phase2_state()
+        state = _layer2_state()
         ebpf, ebpf_detail = _ebpf_state()
-        print("phase 2 deployment")
+        print("layer 2 deployment")
         print(
             "  units     : "
             + ("match this checkout" if state["installed"] else f"not installed for {config.ROOT}")
@@ -663,20 +663,20 @@ def cmd_deploy_phase2(args) -> int:
         return 0 if state["deployed"] else 1
     ok, detail = _ensure_ebpf(args.skip_ebpf)
     print(f"eBPF tracer: {'ok' if ok else 'unavailable'} ({detail})")
-    state = _phase2_state()
+    state = _layer2_state()
     if state["deployed"] and not args.force:
-        print(f"phase 2 already deployed for {config.ROOT}")
+        print(f"layer 2 already deployed for {config.ROOT}")
         print(f"path unit: active; pending requests: {len(deep.pending_requests())}")
         return 0
-    print("installing phase-2 systemd path unit (privilege prompt may follow)...")
-    rc, out, err = _run_phase2_installer(args.user)
+    print("installing layer-2 systemd path unit (privilege prompt may follow)...")
+    rc, out, err = _run_layer2_installer(args.user)
     if out.strip():
         print(out.strip())
     if rc != 0:
         if err.strip():
             print(err.strip(), file=sys.stderr)
         return rc
-    state = _phase2_state()
+    state = _layer2_state()
     if not state["deployed"]:
         print(
             "installer finished but the path unit is not active; "
@@ -685,7 +685,7 @@ def cmd_deploy_phase2(args) -> int:
         )
         return 1
     pending = len(deep.pending_requests())
-    print(f"phase 2 deployed and active for {config.ROOT}")
+    print(f"layer 2 deployed and active for {config.ROOT}")
     print(f"pending requests: {pending}")
     return 0
 
@@ -859,15 +859,15 @@ def cmd_cycle(args) -> int:
                 result["triage_error"] = str(exc)[:300]
                 db.record_run(conn, "cycle/triage", False, str(exc))
 
-        # Phase 1 detection: turn new raw evidence into explicit findings and,
-        # when severe, queue phase-2 deep tracing and seal a phase-1 bundle.
+        # Layer 1 detection: turn new raw evidence into explicit findings and,
+        # when severe, queue layer-2 deep tracing and seal a layer-1 bundle.
         try:
             new_findings = detect.scan(conn)
             if new_findings:
                 counts: dict[str, int] = {}
                 for finding in new_findings:
                     counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
-                result["phase1_findings"] = {
+                result["layer1_findings"] = {
                     "new": len(new_findings), "by_severity": counts,
                     "rules": [f["rule"] for f in new_findings][:20],
                 }
@@ -875,12 +875,12 @@ def cmd_cycle(args) -> int:
 
                 report_mod.append_journal(
                     conn,
-                    f"Phase 1 findings: {len(new_findings)} new",
+                    f"Layer 1 findings: {len(new_findings)} new",
                     "\n".join(
                         f"- **{f['severity']}** `{f['rule']}` {f['subject']}: {f['detail'][:180]}"
                         for f in new_findings[:20]
                     ) + "\n",
-                    "phase1",
+                    "layer1",
                 )
 
                 critical = [f for f in new_findings if f["severity"] == "critical"]
@@ -888,16 +888,16 @@ def cmd_cycle(args) -> int:
                 if queued:
                     result["deep_queued"] = queued
 
-                last_bundle = db.meta_get(conn, "last_phase1_bundle")
+                last_bundle = db.meta_get(conn, "last_layer1_bundle")
                 b_age = (utcnow() - parse_iso(last_bundle)).total_seconds() if last_bundle else 1e9
                 if critical and b_age >= 180:
-                    bun = evidence.make_bundle(conn, reason="phase1-finding", hours=6)
-                    db.meta_set(conn, "last_phase1_bundle", iso())
-                    result["phase1_bundle"] = bun["sha256"]
+                    bun = evidence.make_bundle(conn, reason="layer1-finding", hours=6)
+                    db.meta_set(conn, "last_layer1_bundle", iso())
+                    result["layer1_bundle"] = bun["sha256"]
         except Exception as exc:  # noqa: BLE001
             failed += 1
-            result["phase1_error"] = str(exc)[:300]
-            db.record_run(conn, "cycle/phase1", False, str(exc))
+            result["layer1_error"] = str(exc)[:300]
+            db.record_run(conn, "cycle/layer1", False, str(exc))
 
         # Layer 1 owns the whole routine loop: correlation refresh, the raise
         # gate, cross-check and notification delivery are due-based and
@@ -1088,21 +1088,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--rebaseline", action="store_true", help="reset the drift baseline after an intentional change")
     s.set_defaults(func=cmd_posture)
 
-    s = sub.add_parser("phase1", help="alias for cycle (phase 1)")
+    s = sub.add_parser("layer1", help="alias for cycle (layer 1)")
     s.set_defaults(func=cmd_cycle)
 
-    s = sub.add_parser("findings", help="list phase-1 findings and update their status")
+    s = sub.add_parser("phase1", help="legacy alias for cycle")
+    s.set_defaults(func=cmd_cycle)
+
+    s = sub.add_parser("findings", help="list layer-1 findings and update their status")
     s.add_argument("--limit", type=int, default=50)
     s.add_argument("--only", choices=("open", "investigating", "resolved", "dismissed"))
     s.add_argument("--id", type=int)
     s.add_argument("--set-status", choices=("open", "investigating", "resolved", "dismissed"))
     s.set_defaults(func=cmd_findings)
 
-    s = sub.add_parser("deep", help="phase 2: root-level tracefs/perf investigation")
+    s = sub.add_parser("deep", help="layer 2: root-level tracefs/perf investigation")
     s.add_argument("--consume", action="store_true", help="process queued requests (systemd path unit)")
     s.add_argument("--list", action="store_true", help="list deep runs and pending requests")
     s.add_argument("--case", type=int, help="triage case id")
-    s.add_argument("--finding", type=int, help="phase-1 finding id")
+    s.add_argument("--finding", type=int, help="layer-1 finding id")
     s.add_argument("--pid", type=int, help="process id to inspect")
     s.add_argument("--comm", help="process name for context")
     s.add_argument("--since", help="event timestamp (ISO) for the journal window")
@@ -1115,19 +1118,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser(
         "preflight",
-        help="check sampler, journal, coredump, disk, core-2 and phase-2 prerequisites",
+        help="check sampler, journal, coredump, disk, core-2 and layer-2 prerequisites",
     )
     s.set_defaults(func=cmd_preflight)
 
-    s = sub.add_parser(
-        "deploy-phase2",
-        help="install/verify the per-host phase-2 path unit (idempotent)",
-    )
-    s.add_argument("--check", action="store_true", help="report deployment state only")
-    s.add_argument("--force", action="store_true", help="reinstall even if already active")
-    s.add_argument("--skip-ebpf", action="store_true", help="do not build the eBPF tracer")
-    s.add_argument("--user", help="operator account for the systemd unit (default: this user)")
-    s.set_defaults(func=cmd_deploy_phase2)
+    for deploy_name, deploy_help in (
+        ("deploy-layer2", "install/verify the per-host layer-2 path unit (idempotent)"),
+        ("deploy-phase2", "legacy alias for deploy-layer2"),
+    ):
+        s = sub.add_parser(deploy_name, help=deploy_help)
+        s.add_argument("--check", action="store_true", help="report deployment state only")
+        s.add_argument("--force", action="store_true", help="reinstall even if already active")
+        s.add_argument("--skip-ebpf", action="store_true", help="do not build the eBPF tracer")
+        s.add_argument("--user", help="operator account for the systemd unit (default: this user)")
+        s.set_defaults(func=cmd_deploy_layer2)
 
     s = sub.add_parser("install-cron", help="install the user schedule (1 min cycle, all layer-1 duties inside)")
     s.add_argument("--remove", action="store_true", help="remove the qa-sentinels cron block")

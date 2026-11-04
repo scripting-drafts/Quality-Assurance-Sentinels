@@ -5,11 +5,11 @@ All commands use `./bin/qa <command>` from the repository root.
 | Area | Commands | What they do |
 | --- | --- | --- |
 | Setup and operations | `install.sh`, `uninstall.sh`, `init`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, inspect prerequisites, check scheduling and security posture |
-| Routine collection | `cycle` (`tick`, `phase1`), `sample`, `ingest`, `inventory`, `report` | Capture system state and run every due layer-1 duty |
+| Routine collection | `cycle` (`tick`, `layer1`; `phase1` legacy), `sample`, `ingest`, `inventory`, `report` | Capture system state and run every due layer-1 duty |
 | Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, events, their relationships, and held/outdated packages |
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |
 | Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports |
-| Deep diagnostics | `deploy-phase2`, `deep` | Configure and run queued tracing |
+| Deep diagnostics | `deploy-layer2` (`deploy-phase2` legacy), `deep` | Configure and run queued tracing |
 | Monitoring display | `logs` | Read or follow timestamped activity |
 
 Useful examples:
@@ -62,7 +62,7 @@ Optional reporter details may be put in `config/identity.env`, using `config/ide
 
 - The system gathers **diagnostic evidence**, not a proof of hardware failure or bit flips. Crash correlation and physical-core affinity alone do not establish cause.
 - An `UNCLEAN` boot classification can reflect a crash, power interruption, forced shutdown, or missing shutdown records.
-- Phase 2 depends on kernel interfaces, capabilities, installed tools, and system policy. Unavailable probes may be skipped or reported.
+- Layer 2 depends on kernel interfaces, capabilities, installed tools, and system policy. Unavailable probes may be skipped or reported.
 - Some hardware details and other users' coredumps require optional privileged collection.
 - More frequent or unrestricted logging can create performance and storage overhead.
 - Ticket generation and classification require a human to validate the suspected cause and decide what to disclose.

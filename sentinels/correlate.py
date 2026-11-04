@@ -2,7 +2,7 @@
 
 A silent stop on its own names no component: it only says the machine stopped
 writing. This module looks backwards from the moment the journal ends, groups
-what was happening by *owner*, and asks a different question than phase 1 does:
+what was happening by *owner*, and asks a different question than layer 1 does:
 
     does this same component signature recur across separate silent stops?
 

@@ -6,7 +6,7 @@
 - wakeups (`sched_wakeup`)
 - user and kernel page faults (`page_fault_user`, `page_fault_kernel`)
 
-The loader prints JSON with `totals`, `per_cpu` and `top_comms`. Phase 2 adds
+The loader prints JSON with `totals`, `per_cpu` and `top_comms`. Layer 2 adds
 that JSON to its report and hash manifest.
 
 ## Build
@@ -20,12 +20,12 @@ after a kernel upgrade. It needs `clang`, `bpftool`, `libbpf-dev`, `libelf`,
 
 ## Run
 
-Phase 2 calls it automatically. Manually:
+Layer 2 calls it automatically. Manually:
 
     sudo bin/qa_ebpf --duration 30
 
 Requires `CAP_BPF` + `CAP_PERFMON`; the systemd deep service grants both.
-Without them the loader fails before attaching and phase 2 records
+Without them the loader fails before attaching and layer 2 records
 `eBPF: Operation not permitted`, then continues with ftrace/perf.
 
 ## Limits

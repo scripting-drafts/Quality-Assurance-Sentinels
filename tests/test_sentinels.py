@@ -505,7 +505,11 @@ class BootBoundaryTests(unittest.TestCase):
         conn.executescript(db.SCHEMA)
         return conn
 
-    def _boot(self, conn, boot_id="b1", clean=0, ts="2026-11-03T09:33:14Z"):
+    def _boot(self, conn, boot_id="b1", clean=0, ts=None):
+        if ts is None:
+            from sentinels.util import utcnow
+
+            ts = utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         conn.execute(
             "INSERT INTO boots(boot_id, seq, span, last_ts, ended_clean, markers,"
             " last_message, scans, pstore, kexec_loaded, crashkernel, vmcores, captured_ts)"
@@ -768,7 +772,9 @@ class RaiseGateTests(unittest.TestCase):
             )
             issue = self._issue()
             raised = root / "raise"
+            rejected = root / "rejected"
             with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "REJECT_DIR", rejected), \
                  mock.patch.object(raise_ticket.tickets, "collect_issues",
                                    return_value=[issue]), \
                  mock.patch.object(raise_ticket.report, "append_journal"):
@@ -790,7 +796,7 @@ class RaiseGateTests(unittest.TestCase):
 
             digest = hashlib.sha256((directory / "ticket.md").read_bytes()).hexdigest()
             self.assertEqual(manifest["evidence_files"]["ticket.md"], digest)
-            self.assertEqual(manifest["viability"]["score"], 5)
+            self.assertEqual(manifest["viability"]["score"], 6)
 
     def test_staged_ticket_is_never_deleted_and_records_history(self):
         import json
@@ -812,11 +818,13 @@ class RaiseGateTests(unittest.TestCase):
             issue = self._issue()
             raised = root / "tickets" / "raise"
             standby = root / "tickets" / "in-standby"
+            rejected = root / "tickets" / "rejected"
             marker = raised / "nvidia-old-deadbeef" / "KEEP.txt"
             marker.parent.mkdir(parents=True)
             marker.write_text("staged earlier\n")
             with mock.patch.object(config, "RAISE_DIR", raised), \
                  mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(config, "REJECT_DIR", rejected), \
                  mock.patch.object(raise_ticket.tickets, "collect_issues",
                                    return_value=[issue]), \
                  mock.patch.object(raise_ticket.report, "append_journal"):
@@ -853,9 +861,11 @@ class RaiseGateTests(unittest.TestCase):
                 (str(draft_path), "NVRM: Xid 79"),
             )
             raised, standby = root / "raise", root / "standby"
+            rejected = root / "rejected"
             issue = self._issue()
             with mock.patch.object(config, "RAISE_DIR", raised), \
                  mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(config, "REJECT_DIR", rejected), \
                  mock.patch.object(raise_ticket.report, "append_journal"), \
                  mock.patch.object(raise_ticket.tickets, "collect_issues",
                                    side_effect=[[issue], [], [issue]]):
@@ -891,6 +901,7 @@ class RaiseGateTests(unittest.TestCase):
             (raised / "nvidia-gone-abc").mkdir(parents=True)
             with mock.patch.object(config, "RAISE_DIR", raised), \
                  mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"), \
                  mock.patch.object(raise_ticket.tickets, "collect_issues", return_value=[]), \
                  mock.patch.object(raise_ticket.report, "append_journal"):
                 raise_ticket.run(conn, notify_ready=False)
@@ -921,6 +932,147 @@ class RaiseGateTests(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
             tickets.generate(conn, days=1)
             self.assertEqual(run.call_count, 1)  # same draft set, no second triage
+
+
+class RejectedReportTests(unittest.TestCase):
+    """Held, outdated builds produce a rejected report, never a vendor ticket."""
+
+    def _conn(self):
+        import sqlite3
+        from sentinels import db
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        return conn
+
+    def _held(self):
+        row = {"package": "nvidia-settings", "installed": "610.43.02",
+               "candidate": "615.71.10", "outdated": True}
+        return {"held_total": 1, "held_installed": 1, "mass_hold": False,
+                "owner": "nvidia-settings", "relevant": [row], "outdated": [row]}
+
+    def _issue(self, key="k1", held=True):
+        from sentinels.util import iso
+
+        ts = iso()
+        issue = {
+            "key": key, "vendor": "nvidia",
+            "signature": "nvidia-settings SIGABRT", "kind": "crash", "count": 3,
+            "first": ts, "last": ts, "severity": "critical",
+            "rows": [{
+                "ts": ts, "pid": 7, "comm": "nvidia-settings",
+                "exe": "/usr/bin/nvidia-settings", "sig": "SIGABRT",
+                "cpus_allowed": "2,8", "core2_involved": 1, "context": "ctx",
+                "boot_id": "bootA", "severity": "critical",
+            }],
+        }
+        if held:
+            issue["held"] = self._held()
+        return issue
+
+    def _draft(self, conn, root):
+        path = root / "draft.md"
+        path.write_text("# draft\n", encoding="utf-8")
+        conn.execute(
+            "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+            " VALUES(datetime('now'),'nvidia',?,?,'k1')",
+            (str(path), "nvidia-settings SIGABRT"),
+        )
+
+    def test_gate_flags_a_held_outdated_build(self):
+        from sentinels import raise_ticket
+
+        conn = self._conn()
+        verdict = raise_ticket.assess(
+            conn, {"issue_key": "k1", "vendor": "nvidia"}, self._issue()
+        )
+        self.assertFalse(verdict["viable"])
+        self.assertTrue(verdict["hold_explained"])
+        failed = [c["check"] for c in verdict["checks"] if not c["ok"]]
+        self.assertIn("build-current", failed)
+        self.assertIn("held-outdated", " ".join(verdict["reasons"]))
+
+    def test_held_outdated_crash_is_filed_under_rejected(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            self._draft(conn, root)
+            raised, rejected = root / "raise", root / "rejected"
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", rejected), \
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
+                                   return_value=[self._issue()]), \
+                 mock.patch.object(raise_ticket.report, "append_journal"):
+                result = raise_ticket.run(conn, notify_ready=False)
+            self.assertEqual(result["viable"], 0, result)
+            self.assertEqual(len(result["rejected_staged"]), 1, result)
+            directory = pathlib.Path(result["rejected_staged"][0])
+            self.assertEqual(directory.parent, rejected)
+            self.assertTrue((directory / "ticket.md").exists())
+            self.assertTrue((directory / "evidence" / "manifest.json").exists())
+            note = (directory / "REJECTED.md").read_text()
+            self.assertIn("held-outdated", note)
+            self.assertIn("nvidia-settings", note)
+            manifest = json.loads((directory / "evidence" / "manifest.json").read_text())
+            self.assertEqual(manifest["bucket"], "rejected")
+            index = (rejected / "INDEX.md").read_text()
+            self.assertIn(directory.name, index)
+            self.assertIn("held-outdated", index)
+
+    def test_rejected_report_returns_to_raise_when_build_is_current(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            self._draft(conn, root)
+            raised, rejected = root / "raise", root / "rejected"
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", rejected), \
+                 mock.patch.object(raise_ticket.report, "append_journal"), \
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
+                                   side_effect=[[self._issue()],
+                                                [self._issue(held=False)]]):
+                first = raise_ticket.run(conn, notify_ready=False)
+                self.assertEqual(first["viable"], 0)
+                name = pathlib.Path(first["rejected_staged"][0]).name
+                second = raise_ticket.run(conn, notify_ready=False)
+            self.assertEqual(second["viable"], 1, second)
+            self.assertTrue((raised / name / "ticket.md").exists())
+            self.assertFalse((rejected / name).exists())
+            self.assertIn(name, second["reactivated"])
+            events = [
+                json.loads(line)["event"]
+                for line in (raised / name / "evidence" / "rejected.jsonl")
+                .read_text().splitlines() if line.strip()
+            ]
+            self.assertEqual(events, ["rejected", "cleared"])
+
+    def test_held_context_only_resolves_absolute_crash_paths(self):
+        from unittest import mock
+        from sentinels import tickets
+
+        self.assertEqual(tickets.held_context(self._issue(held=False) | {"kind": "event"}), {})
+        relative = self._issue(held=False)
+        relative["rows"][0]["exe"] = "nvidia-settings"
+        self.assertEqual(tickets.held_context(relative), {})
+        absolute = self._issue(held=False)
+        with mock.patch.object(tickets.holds, "relevant", return_value={"outdated": [1]}) as rel:
+            self.assertEqual(tickets.held_context(absolute), {"outdated": [1]})
+        rel.assert_called_once_with("/usr/bin/nvidia-settings")
 
 
 class NotificationTraceCrosscheckTests(unittest.TestCase):

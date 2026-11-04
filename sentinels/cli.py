@@ -979,7 +979,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--package", help="show apt policy for one package")
     s.set_defaults(func=cmd_holds)
 
-    s = sub.add_parser("raise", help="stage viable tickets under raise/ with their evidence")
+    s = sub.add_parser("raise", help="stage viable tickets under raise/, held-outdated ones under rejected/")
     s.add_argument("--days", type=int, default=30)
     s.add_argument("--min-count", type=int)
     s.add_argument("--no-notify", action="store_true")

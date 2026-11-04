@@ -9,7 +9,7 @@ import os
 import re
 from datetime import timedelta
 
-from . import classify, config, correlate, db
+from . import classify, config, correlate, db, holds
 from .util import (
     human_bytes, identity_for_ticket, iso, read_text, redact, run, sha256_text, utcnow,
 )
@@ -94,6 +94,24 @@ def _repro_block(vendor: str) -> list[str]:
     ]
 
 
+def held_context(issue: dict) -> dict:
+    """Held/outdated package context for a crash issue, when resolvable.
+
+    Only an absolute executable path can be attributed to an installed package,
+    and a lookup failure must never stop a draft from being generated. The
+    result is attached to the issue so the gate and the draft text agree.
+    """
+    if issue.get("kind") != "crash":
+        return {}
+    exe = next((r.get("exe") for r in issue.get("rows") or [] if r.get("exe")), None)
+    if not exe or not os.path.isabs(str(exe)):
+        return {}
+    try:
+        return holds.relevant(str(exe))
+    except Exception:  # noqa: BLE001 - package state is advisory, never fatal
+        return {}
+
+
 def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dict]:
     since = (utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     crashes = [dict(r) for r in conn.execute(
@@ -172,6 +190,12 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
     # silent stops correlated with a recurring component signature: the one path
     # where a ticket has no single log line to point at, only a convergence.
     result.extend(correlate.ticket_candidates(conn, days))
+    # attach package state once, so the viability gate and the draft body use
+    # the same answer instead of querying apt twice and disagreeing
+    for issue in result:
+        hold = held_context(issue)
+        if hold:
+            issue["held"] = hold
     result.sort(
         key=lambda i: (
             i["kind"] != "correlation",
@@ -231,10 +255,9 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
     ]
     if issue.get("kind") == "crash":
         # a crash in a held, outdated module may already be fixed upstream
-        from . import holds as holdsmod
-
-        exe = next((r.get("exe") for r in rows if r.get("exe")), None)
-        hold = holdsmod.relevant(exe)
+        hold = issue.get("held")
+        if hold is None:
+            hold = held_context(issue)
         if hold.get("relevant") or hold.get("mass_hold"):
             lines += ["## Held packages", ""]
             if hold.get("mass_hold"):

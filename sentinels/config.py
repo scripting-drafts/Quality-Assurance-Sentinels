@@ -16,6 +16,7 @@ TICKET_DIR = ROOT / "tickets"
 DRAFT_DIR = TICKET_DIR / "drafts"
 RAISE_DIR = TICKET_DIR / "raise"
 STANDBY_DIR = TICKET_DIR / "in-standby"
+REJECT_DIR = TICKET_DIR / "rejected"
 TRIAGE_DIR = ROOT / "triage" / "core2"
 DEEP_DIR = TRIAGE_DIR / "deep"
 DEEP_REQUEST_DIR = TRIAGE_DIR / "deep-requests"
@@ -79,6 +80,6 @@ def ensure_dirs() -> None:
     for d in (
         VAR, JOURNAL_DIR, REPORT_DIR, EVIDENCE_DIR, TICKET_DIR, DRAFT_DIR,
         TRIAGE_DIR, DEEP_DIR, DEEP_REQUEST_DIR, DEEP_ARCHIVE_DIR, CONFIG_DIR,
-        RAISE_DIR, STANDBY_DIR,
+        RAISE_DIR, STANDBY_DIR, REJECT_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)

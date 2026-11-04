@@ -96,6 +96,26 @@ def assess(conn, draft: dict, issue: dict | None, days: int = 30,
     )
     check("actionable", actionable, reason if not actionable else "component-level signal present")
 
+    # A crash in a held, outdated package is not a vendor bug yet: the fix may
+    # already exist in the candidate, and only a local unpin can prove it.
+    hold = (issue or {}).get("held") or {}
+    outdated = hold.get("outdated") or []
+    if outdated:
+        shown = "; ".join(
+            f"{h.get('package')} {h.get('installed')} -> {h.get('candidate')}"
+            for h in outdated[:3]
+        )
+        hold_detail = f"held-outdated package(s): {shown}"
+    elif hold.get("mass_hold"):
+        hold_detail = (
+            f"system-wide hold: {hold.get('held_total')} packages pinned, "
+            f"{hold.get('held_installed')} installed"
+        )
+    else:
+        hold_detail = "no held, outdated package matches this crash"
+    hold_explained = bool(outdated) or bool(hold.get("mass_hold"))
+    check("build-current", not hold_explained, hold_detail)
+
     viable = all(c["ok"] for c in checks)
     score = sum(1 for c in checks if c["ok"])
     return {
@@ -103,6 +123,7 @@ def assess(conn, draft: dict, issue: dict | None, days: int = 30,
         "score": score,
         "max_score": len(checks),
         "vendor": vendor,
+        "hold_explained": hold_explained,
         "checks": checks,
         "reasons": [c["detail"] for c in checks if not c["ok"]],
     }
@@ -139,9 +160,14 @@ def _write(path, text: str) -> str:
     return sha256_text(text)
 
 
-def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) -> dict:
-    """Create the per-ticket directory with its own evidence."""
-    directory = config.RAISE_DIR / _dir_name(draft, issue)
+def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
+          root=None, bucket: str = "raise") -> dict:
+    """Create the per-ticket directory with its own evidence.
+
+    The layout is identical in raise/, rejected/ and in-standby/, so a ticket
+    can move between buckets without losing evidence or history.
+    """
+    directory = (root or config.RAISE_DIR) / _dir_name(draft, issue)
     # never rm/rewrite: a staged ticket is a record, not a cache entry
     (directory / "evidence").mkdir(parents=True, exist_ok=True)
 
@@ -190,11 +216,18 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) ->
             util.redact("\n".join(stop_lines)) + "\n",
         )
 
+    if bucket == "rejected":
+        hashes["REJECTED.md"] = _write(
+            directory / "REJECTED.md", _rejection_note(issue, verdict)
+        )
+        _record_rejected(directory, verdict)
+
     manifest = {
         "issue_key": issue["key"],
         "vendor": issue["vendor"],
         "signature": util.redact(issue["signature"]),
         "kind": issue.get("kind"),
+        "bucket": bucket,
         "occurrences": issue.get("count"),
         "first": issue.get("first"),
         "last": issue.get("last"),
@@ -213,7 +246,7 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) ->
         json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",
     )
 
-    _write(directory / "HOWTO.md", _howto(issue, verdict))
+    _write(directory / "HOWTO.md", _howto(issue, verdict, bucket))
     _record_history(directory, issue, verdict, hashes)
 
     return {
@@ -221,6 +254,7 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None) ->
         "issue_key": issue["key"],
         "vendor": issue["vendor"],
         "signature": issue["signature"][:120],
+        "bucket": bucket,
         "files": sorted(hashes),
         "manifest_sha256": hashes["evidence/manifest.json"],
         "verdict": verdict,
@@ -279,65 +313,99 @@ def _merge_into(source, destination, label: str) -> None:
     shutil.move(str(source), str(target))
 
 
-def _record_standby(directory, event: str, reason: str) -> None:
-    path = directory / "evidence" / "standby.jsonl"
+def _record_event(directory, record: str, event: str, reason: str) -> None:
+    path = directory / "evidence" / record
     path.parent.mkdir(parents=True, exist_ok=True)
     util.append_jsonl(path, {"ts": iso(), "event": event, "reason": reason})
 
 
-def reconcile(conn, viable_names: set[str],
+def _record_rejected(directory, verdict: dict) -> None:
+    """One rejection entry per rejection episode, not one per five-minute run."""
+    path = directory / "evidence" / "rejected.jsonl"
+    if path.exists():
+        try:
+            lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            if lines and json.loads(lines[-1]).get("event") == "rejected":
+                return
+        except (OSError, json.JSONDecodeError):
+            pass
+    _record_event(directory, "rejected.jsonl", "rejected",
+                  "; ".join(verdict.get("reasons") or [])[:500])
+
+
+def _bucket_roots() -> dict:
+    return {
+        "raise": config.RAISE_DIR,
+        "standby": config.STANDBY_DIR,
+        "rejected": config.REJECT_DIR,
+    }
+
+
+def reconcile(conn, desired: dict[str, str],
               assessments: dict[str, dict]) -> dict:
-    """Move tickets between raise/ and in-standby/. Never delete.
+    """Move ticket directories to the bucket their verdict asks for.
 
-    raise/     = viable now, ready for a human to post
-    in-standby = was viable, is not now; kept only as an audit trail
+    raise/     viable now, ready for a human to post
+    rejected/  explained by local package state (held/outdated build)
+    standby/   was viable, is not now; kept only as an audit trail
+
+    Nothing is deleted: if the destination already exists, the older copy is
+    parked inside its evidence/ directory instead of overwriting it.
     """
-    config.RAISE_DIR.mkdir(parents=True, exist_ok=True)
-    config.STANDBY_DIR.mkdir(parents=True, exist_ok=True)
-    reactivated, stood_down = [], []
+    roots = _bucket_roots()
+    for root in roots.values():
+        root.mkdir(parents=True, exist_ok=True)
 
-    # a ticket that became viable again comes back out of standby
-    for path in sorted(config.STANDBY_DIR.iterdir()):
-        if not path.is_dir() or path.name not in viable_names:
+    present: dict[str, str] = {}
+    for bucket, root in roots.items():
+        for path in sorted(root.iterdir()):
+            if path.is_dir() and path.name not in present:
+                present[path.name] = bucket
+
+    reactivated, stood_down, rejected_moves = [], [], []
+    for name, source in sorted(present.items()):
+        target = desired.get(name, "standby")
+        if target == source:
             continue
-        destination = config.RAISE_DIR / path.name
+        src = roots[source] / name
+        destination = roots[target] / name
         if destination.exists():
-            _merge_into(path, destination, "standby")
+            _merge_into(src, destination, source)
         else:
-            shutil.move(str(path), str(destination))
-        _record_standby(destination, "reactivated", "viability checks passed again")
-        reactivated.append(path.name)
+            shutil.move(str(src), str(destination))
 
-    # a staged ticket that is no longer viable is parked, not removed
-    for path in sorted(config.RAISE_DIR.iterdir()):
-        if not path.is_dir() or path.name in viable_names:
-            continue
-        info = assessments.get(path.name) or {}
-        reasons = info.get("verdict", {}).get("reasons") or [
-            "no current draft reproduces this ticket"
-        ]
-        destination = config.STANDBY_DIR / path.name
-        if destination.exists():
-            _merge_into(path, destination, "raise")
+        info = assessments.get(name) or {}
+        reason = "; ".join(
+            info.get("verdict", {}).get("reasons")
+            or ["no current draft reproduces this ticket"]
+        )[:500]
+        if target == "raise":
+            _record_event(destination, "standby.jsonl", "reactivated",
+                          "viability checks passed again")
+            if source == "rejected":
+                _record_event(destination, "rejected.jsonl", "cleared", reason)
+            reactivated.append(name)
+        elif target == "rejected":
+            _record_event(destination, "rejected.jsonl", "rejected", reason)
+            rejected_moves.append(name)
         else:
-            shutil.move(str(path), str(destination))
-        _record_standby(destination, "standby", "; ".join(reasons)[:500])
-        stood_down.append({"ticket": path.name, "reason": "; ".join(reasons)[:300]})
+            _record_event(destination, "standby.jsonl", "standby", reason)
+            stood_down.append({"ticket": name, "reason": reason[:300]})
 
-    _write_standby_index(conn)
-    return {"reactivated": reactivated, "stood_down": stood_down}
+    return {"reactivated": reactivated, "stood_down": stood_down,
+            "rejected": rejected_moves}
 
 
-def _write_standby_index(conn) -> None:
+def _write_bucket_index(root, record: str, title: str, empty: str) -> None:
     entries = []
-    for path in sorted(config.STANDBY_DIR.iterdir()):
+    for path in sorted(root.iterdir()):
         if not path.is_dir():
             continue
-        record = path / "evidence" / "standby.jsonl"
         last = {}
-        if record.exists():
+        log = path / "evidence" / record
+        if log.exists():
             try:
-                lines = [ln for ln in record.read_text(encoding="utf-8").splitlines() if ln.strip()]
+                lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
                 if lines:
                     last = json.loads(lines[-1])
             except (OSError, json.JSONDecodeError):
@@ -354,7 +422,7 @@ def _write_standby_index(conn) -> None:
             "name": path.name, "vendor": vendor, "signature": signature,
             "since": last.get("ts", ""), "reason": last.get("reason", ""),
         })
-    lines = ["# Tickets in standby", "",
+    lines = [f"# {title}", "",
              f"Generated {iso()} — kept for traceability; nothing here is deleted.", ""]
     if entries:
         lines += ["| ticket | vendor | reason | since |", "|---|---|---|---|"]
@@ -364,11 +432,27 @@ def _write_standby_index(conn) -> None:
                 f"{entry['reason'][:140]} | {entry['since']} |"
             )
     else:
-        lines.append("No tickets in standby.")
-    _write(config.STANDBY_DIR / "INDEX.md", "\n".join(lines) + "\n")
+        lines.append(empty)
+    _write(root / "INDEX.md", "\n".join(lines) + "\n")
 
 
-def _howto(issue: dict, verdict: dict) -> str:
+def _howto(issue: dict, verdict: dict, bucket: str = "raise") -> str:
+    if bucket == "rejected":
+        return f"""# Why this report is in rejected/
+
+Vendor: **{issue['vendor']}** — {issue['kind']} cluster `{issue['key']}`
+
+The crash is explained by local package state, not by a defect the vendor can
+act on. See `REJECTED.md` for the exact reason.
+
+1. Release the hold and upgrade the named package(s).
+2. Re-run `./bin/qa raise`; if the crash stops reproducing on the candidate,
+   the directory stays here as an audit record.
+3. If it still reproduces on the current candidate, the ticket moves back to
+   `tickets/raise/` automatically.
+
+Viability: {verdict['score']}/{verdict['max_score']} checks passed.
+"""
     return f"""# How to raise this ticket
 
 Vendor: **{issue['vendor']}** — {issue['kind']} cluster `{issue['key']}`
@@ -383,26 +467,55 @@ Viability: {verdict['score']}/{verdict['max_score']} checks passed.
 """
 
 
+def _rejection_note(issue: dict, verdict: dict) -> str:
+    reasons = "\n".join(
+        f"- {reason}" for reason in (verdict.get("reasons") or ["no reason recorded"])
+    )
+    return f"""# Rejected — the local build explains this crash
+
+Vendor: **{issue['vendor']}** — {issue['kind']} cluster `{issue['key']}`
+
+A vendor cannot fix a pinned, outdated build. The draft is kept as evidence of
+what was running, not as a report to post.
+
+## Why
+
+{reasons}
+
+## What clears it
+
+Upgrade the named package(s) to the candidate (release the hold first), then
+re-run `./bin/qa raise`. The ticket returns to `tickets/raise/` only if the
+crash still reproduces on the current build.
+"""
+
+
 # ---------------------------------------------------------------- run
 def run(conn, days: int = 30, min_count: int | None = None,
         notify_ready: bool = True) -> dict:
     config.RAISE_DIR.mkdir(parents=True, exist_ok=True)
+    config.REJECT_DIR.mkdir(parents=True, exist_ok=True)
     issues = {i["key"]: i for i in tickets.collect_issues(conn, days)}
     drafts = [dict(r) for r in conn.execute("SELECT * FROM ticket_drafts ORDER BY vendor, ts")]
     bundle_row = conn.execute("SELECT * FROM bundles ORDER BY id DESC LIMIT 1").fetchone()
     bundle = dict(bundle_row) if bundle_row else None
 
-    raised, rejected = [], []
+    raised, rejected, rejected_staged = [], [], []
     assessments: dict[str, dict] = {}
-    viable_names: set[str] = set()
+    desired: dict[str, str] = {}
     for draft in drafts:
         issue = issues.get(draft["issue_key"])
         verdict = assess(conn, draft, issue, days=days, min_count=min_count)
         name = _dir_name(draft, issue)
         assessments[name] = {"draft": draft, "verdict": verdict}
         if verdict["viable"] and issue:
-            viable_names.add(name)
+            desired[name] = "raise"
+        elif issue and verdict.get("hold_explained"):
+            # the local build explains it: keep the report, but never raise it
+            desired[name] = "rejected"
         else:
+            desired[name] = "standby"
+        if not (verdict["viable"] and issue):
             rejected.append({
                 "key": draft["issue_key"],
                 "vendor": draft["vendor"],
@@ -410,15 +523,22 @@ def run(conn, days: int = 30, min_count: int | None = None,
                 "reasons": verdict["reasons"],
             })
 
-    # park what stopped being viable *before* staging, so a reactivated
-    # directory is reused instead of duplicated
-    moves = reconcile(conn, viable_names, assessments)
+    # re-bucket what moved *before* staging, so a directory that changed bucket
+    # is updated in place instead of duplicated
+    moves = reconcile(conn, desired, assessments)
 
     for draft in drafts:
         issue = issues.get(draft["issue_key"])
+        if not issue:
+            continue
         verdict = assessments[_dir_name(draft, issue)]["verdict"]
-        if verdict["viable"] and issue:
+        if verdict["viable"]:
             raised.append(stage(conn, draft, issue, verdict, bundle))
+        elif verdict.get("hold_explained"):
+            rejected_staged.append(stage(
+                conn, draft, issue, verdict, bundle,
+                root=config.REJECT_DIR, bucket="rejected",
+            ))
 
     config.RAISE_DIR.mkdir(parents=True, exist_ok=True)
     index = ["# Tickets staged for raising", "",
@@ -444,34 +564,41 @@ def run(conn, days: int = 30, min_count: int | None = None,
             )
         index.append("")
     _write(config.RAISE_DIR / "INDEX.md", "\n".join(index))
+    _write_bucket_index(config.STANDBY_DIR, "standby.jsonl", "Tickets in standby",
+                        "No tickets in standby.")
+    _write_bucket_index(config.REJECT_DIR, "rejected.jsonl", "Rejected reports",
+                        "No rejected reports.")
 
-    if raised:
+    if raised or rejected_staged:
         report.append_journal(
             conn,
-            f"Raise gate: {len(raised)} viable, {len(rejected)} rejected",
+            f"Raise gate: {len(raised)} viable, {len(rejected)} rejected, "
+            f"{len(rejected_staged)} filed under rejected/",
             "\n".join(f"- {r['vendor']}: {r['signature']}" for r in raised[:10]) + "\n",
             "raise",
         )
-        if notify_ready:
-            from . import notify
+    if raised and notify_ready:
+        from . import notify
 
-            # identity, not hashes: manifests are regenerated every run and a
-            # hash-based key would pop a notification every 5 minutes.
-            digest = sha256_text("|".join(sorted(r["issue_key"] for r in raised)))[:16]
-            notify.enqueue(
-                conn, "raise", f"raise|{digest}",
-                f"{len(raised)} ticket(s) staged in raise/",
-                "\n".join(f"- {r['vendor']}: {r['signature']}" for r in raised[:6]),
-                detail=str(config.RAISE_DIR),
-                path=str(config.RAISE_DIR / "INDEX.md"),
-            )
+        # identity, not hashes: manifests are regenerated every run and a
+        # hash-based key would pop a notification every 5 minutes.
+        digest = sha256_text("|".join(sorted(r["issue_key"] for r in raised)))[:16]
+        notify.enqueue(
+            conn, "raise", f"raise|{digest}",
+            f"{len(raised)} ticket(s) staged in raise/",
+            "\n".join(f"- {r['vendor']}: {r['signature']}" for r in raised[:6]),
+            detail=str(config.RAISE_DIR),
+            path=str(config.RAISE_DIR / "INDEX.md"),
+        )
 
     return {
         "drafts": len(drafts),
         "viable": len(raised),
         "rejected": len(rejected),
         "staged": [r["directory"] for r in raised],
+        "rejected_staged": [r["directory"] for r in rejected_staged],
         "rejected_keys": [r["key"] for r in rejected],
         "stood_down": moves["stood_down"],
         "reactivated": moves["reactivated"],
+        "rejected_moves": moves["rejected"],
     }

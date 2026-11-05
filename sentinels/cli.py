@@ -303,8 +303,9 @@ def cmd_boots(args) -> int:
             return 0
 
         fresh = boot.collect(conn, limit=args.limit, refresh=args.refresh)
-        if fresh["new"] or fresh["updated"]:
-            print(f"recorded {fresh['new']} new, refreshed {fresh['updated']} boot(s); "
+        if fresh["new"] or fresh["updated"] or fresh["pstore_updated"]:
+            print(f"recorded {fresh['new']} new, refreshed {fresh['updated']} boot(s), "
+                  f"{fresh['pstore_updated']} pstore record(s); "
                   f"{len(fresh['unclean'])} unclean")
         rows = boot.rows(conn, limit=args.limit)
         if not rows:

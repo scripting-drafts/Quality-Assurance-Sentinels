@@ -368,6 +368,27 @@ class DeploymentTests(unittest.TestCase):
         check = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
         self.assertEqual(check.returncode, 0, check.stderr)
 
+    def test_installer_wires_the_pstore_export_unit(self):
+        import subprocess
+        from sentinels import config
+
+        install = (config.ROOT / "install.sh").read_text()
+        system = (config.ROOT / "root" / "install-system.sh").read_text()
+        exporter = (config.ROOT / "root" / "pstore-export.sh").read_text()
+        uninstall = (config.ROOT / "uninstall.sh").read_text()
+
+        self.assertIn("qa-pstore-export.service", install)
+        self.assertIn("After=systemd-pstore.service", install)
+        self.assertIn("ExecStart=$ROOT/root/pstore-export.sh --refresh", install)
+        self.assertNotIn("install-pstore.sh", install)
+        self.assertNotIn("install-pstore.sh", system)
+        self.assertFalse((config.ROOT / "root" / "install-pstore.sh").exists())
+        self.assertIn("--refresh", exporter)
+        self.assertIn("qa-pstore-export.service", uninstall)
+        check = subprocess.run(["bash", "-n", str(config.ROOT / "root" / "pstore-export.sh")],
+                               capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
     def test_installer_dry_run_selects_each_layer_without_changing_anything(self):
         import subprocess
         from sentinels import config
@@ -1075,6 +1096,133 @@ class BootBoundaryTests(unittest.TestCase):
         regex = re.compile(panic)
         self.assertIsNone(regex.search("(EE) event16 - Mouse: client bug: lagging behind"))
         self.assertIsNotNone(regex.search("kernel BUG at mm/slub.c:1"))
+
+    def test_xorg_nvidia_flood_is_not_the_last_message(self):
+        from unittest import mock
+        from sentinels import boot
+
+        record = {"index": -1, "boot_id": "flood", "span": "span"}
+        tail = "\n".join(
+            f"2026-11-04T19:58:04+01:00 host gdm-x-session[1]: (--) NVIDIA(GPU-0): DFP-{i}: disconnected"
+            for i in range(50)
+        ) + "\n2026-11-04T19:58:05+01:00 host CRON[1]: last real line"
+        with mock.patch.object(boot, "_journal", return_value=tail), \
+             mock.patch.object(boot, "_scan_output", return_value=""), \
+             mock.patch.object(boot, "_last_epoch", return_value="2026-11-04T18:58:04Z"):
+            scanned = boot.scan_boot(record)
+        self.assertEqual(scanned["last_message"], "2026-11-04T19:58:05+01:00 host CRON[1]: last real line")
+
+    def test_journal_tail_count_ignores_nvidia_noise(self):
+        from unittest import mock
+        from sentinels import boot
+
+        out = (
+            "2026-11-04T19:58:04+01:00 host gdm-x-session[1]: (--) NVIDIA(GPU-0): DFP-0: disconnected\n"
+            "2026-11-04T19:58:01+01:00 host CRON[1]: last real line\n"
+        )
+        with mock.patch.object(boot, "run", return_value=(0, out, "")):
+            count, lines = boot.journal_tail("-1", limit=10)
+        self.assertEqual(count, 1)
+        self.assertEqual(lines[-1], "2026-11-04T19:58:01+01:00 host CRON[1]: last real line")
+
+    def test_root_only_pstore_archive_is_not_called_empty(self):
+        from sentinels import boot
+
+        state = boot._crash_capture_state([
+            {"name": "179381869", "readable": False, "panic": ""},
+        ])
+        self.assertIn("archive:179381869:root-only", state["pstore"])
+
+    def test_pstore_export_dir_honours_the_environment(self):
+        import importlib
+        import os
+        import pathlib
+        from unittest import mock
+        from sentinels import config
+
+        try:
+            with mock.patch.dict(os.environ, {"QA_PSTORE_EXPORT_DIR": "/tmp/qa-pstore-env"}):
+                reloaded = importlib.reload(config)
+                self.assertEqual(
+                    reloaded.PSTORE_EXPORT_DIR, pathlib.Path("/tmp/qa-pstore-env")
+                )
+        finally:
+            os.environ.pop("QA_PSTORE_EXPORT_DIR", None)
+            importlib.reload(config)
+
+    def test_archived_pstore_panic_is_read_and_reported(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import boot, config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = pathlib.Path(tmp) / "179381869"
+            archive.mkdir()
+            (archive / "dmesg.txt").write_text(
+                "Panic#1 Part1\n"
+                "<0>[ 6527.559975] Kernel panic - not syncing: stack-protector: "
+                "Kernel stack is corrupted in: __schedule+0x66e/0x6a0 "
+                f"path {config.HOME}/private\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(config, "PSTORE_ARCHIVE_DIR", pathlib.Path(tmp)), \
+                 mock.patch.object(config, "PSTORE_EXPORT_DIR", pathlib.Path(tmp) / "export"), \
+                 mock.patch.object(boot, "_journal", return_value="last line\n"), \
+                 mock.patch.object(boot, "_scan_output", return_value=""), \
+                 mock.patch.object(boot, "_last_epoch", return_value="2026-11-04T18:58:04Z"):
+                scanned = boot.scan_boot({"index": -1, "boot_id": "arch", "span": "span"})
+
+        self.assertIn("archive:179381869:panic", scanned["pstore"])
+        scans = json.loads(scanned["scans"])
+        self.assertEqual(scans["pstore"]["count"], 1)
+        self.assertIn("stack-protector", scans["pstore"]["sample"][0])
+        self.assertIn("/home/<user>/private", scans["pstore"]["sample"][0])
+        self.assertNotIn(str(config.HOME), scans["pstore"]["sample"][0])
+
+        conn = self._conn()
+        self._boot(conn, "arch", ts=scanned["last_ts"])
+        conn.execute(
+            "UPDATE boots SET scans=?, pstore=? WHERE boot_id='arch'",
+            (scanned["scans"], json.dumps(scanned["pstore"])),
+        )
+        findings = boot.findings(conn, "2026-11-01T00:00:00Z")
+        self.assertIn("archived pstore panic=1", findings[0]["detail"])
+        self.assertIn("pstore=archive(panic)", findings[0]["detail"])
+
+    def test_pstore_refresh_updates_boots_without_journal(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import boot, config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = pathlib.Path(tmp) / "179369479"
+            archive.mkdir()
+            (archive / "dmesg.txt").write_text(
+                "<0>[ 5938.083275] Kernel panic - not syncing: stack-protector: "
+                "Kernel stack is corrupted in: __schedule+0x66e/0x6a0\n",
+                encoding="utf-8",
+            )
+            conn = self._conn()
+            self._boot(conn, "old", ts="2026-11-03T08:33:14Z")
+            conn.execute(
+                "UPDATE boots SET scans=?, pstore=? WHERE boot_id='old'",
+                (json.dumps({"pstore": {
+                    "label": "archived pstore panic", "count": 0,
+                    "sample": ["179369479: root-only archive (no readable export)"],
+                }}), json.dumps(["archive:179369479:root-only"])),
+            )
+            with mock.patch.object(config, "PSTORE_ARCHIVE_DIR", pathlib.Path(tmp)), \
+                 mock.patch.object(config, "PSTORE_EXPORT_DIR", pathlib.Path(tmp) / "export"):
+                updated = boot.refresh_pstore(conn)
+
+        self.assertEqual(updated, 1)
+        row = conn.execute("SELECT * FROM boots WHERE boot_id='old'").fetchone()
+        self.assertIn("archive:179369479:panic", json.loads(row["pstore"]))
+        scans = json.loads(row["scans"])
+        self.assertEqual(scans["pstore"]["count"], 1)
+        self.assertIn("stack-protector", scans["pstore"]["sample"][0])
 
 
 class CorrelationTests(unittest.TestCase):

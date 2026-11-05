@@ -3,7 +3,8 @@
 #
 # Two layers can be added independently:
 #   layer 1  collection: build the sampler, initialise the store,
-#                      run one cycle, and schedule it (cron or systemd timer)
+#                      run one cycle, schedule it (cron or systemd timer) and
+#                      install the root pstore export unit
 #   layer 2  deep diagnostics: eBPF tracer and the systemd path unit
 #                      that consumes queued deep-trace requests
 #
@@ -37,7 +38,7 @@ DRY_RUN=0
 CHECK=0
 USER_ARGS=()
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 die() { echo "$*" >&2; exit 2; }
 
@@ -75,6 +76,12 @@ audit_install() {
     fi
   else
     echo "  systemd : no qa-sentinel.timer"
+  fi
+
+  if [[ -e /etc/systemd/system/qa-pstore-export.service ]]; then
+    echo "  pstore  : qa-pstore-export.service installed"
+  else
+    echo "  pstore  : no export unit (manual: sudo root/pstore-export.sh --refresh)"
   fi
 
   echo
@@ -209,9 +216,9 @@ fi
 # ---------------------------------------------------------------- plan
 if [[ $LAYER1 -eq 1 ]]; then
   if [[ "$SCHEDULE" == "systemd" ]]; then
-    layer1_plan="build sampler, init store, first cycle, systemd timer"
+    layer1_plan="build sampler, init store, first cycle, systemd timer, pstore export unit"
   else
-    layer1_plan="build sampler, init store, first cycle, user cron"
+    layer1_plan="build sampler, init store, first cycle, user cron, pstore export unit"
   fi
 else
   layer1_plan="skipped"
@@ -236,6 +243,54 @@ fi
 run() {
   printf '   $ %s\n' "$*"
   [[ $DRY_RUN -eq 1 ]] || "$@"
+}
+
+pstore_unit() {
+  cat <<EOF
+[Unit]
+Description=Export qa-sentinels pstore panic summaries
+Documentation=file://$ROOT/root/PSTORE.md
+After=systemd-pstore.service local-fs.target systemd-journald.service
+Wants=systemd-pstore.service
+ConditionPathIsDirectory=/var/lib/systemd/pstore
+
+[Service]
+Type=oneshot
+ExecStart=$ROOT/root/pstore-export.sh --refresh
+TimeoutStartSec=300
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+install_pstore_unit() {
+  local unit=/etc/systemd/system/qa-pstore-export.service
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "   ! systemctl missing; pstore export unit not installed" >&2
+    return 0
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "   $ write pstore unit: $unit"
+    echo "   $ systemctl daemon-reload"
+    echo "   $ systemctl enable --now qa-pstore-export.service"
+    return 0
+  fi
+  if [[ ${EUID} -eq 0 ]]; then
+    pstore_unit >"$unit"
+    systemctl daemon-reload
+    systemctl enable --now qa-pstore-export.service
+    echo "   installed qa-pstore-export.service"
+  elif command -v sudo >/dev/null 2>&1 && { sudo -n true 2>/dev/null || [[ -t 0 ]]; }; then
+    pstore_unit | sudo tee "$unit" >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now qa-pstore-export.service
+    echo "   installed qa-pstore-export.service"
+  else
+    echo "   ! pstore export unit not installed (sudo required)" >&2
+    echo "     rerun with sudo or install $unit manually" >&2
+  fi
 }
 
 # ---------------------------------------------------------------- layer 1
@@ -285,6 +340,11 @@ elif [[ $LAYER1 -eq 1 ]]; then
 else
   echo "== layer 1 skipped: nothing schedules the one-minute cycle"
   echo "   run $ROOT/bin/qa cycle manually, or rerun ./install.sh --layer1"
+fi
+
+if [[ $LAYER1 -eq 1 ]]; then
+  echo "== pstore: root export unit"
+  install_pstore_unit
 fi
 
 echo

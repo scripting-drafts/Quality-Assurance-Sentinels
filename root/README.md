@@ -23,6 +23,7 @@ appears in `triage/core2/deep-requests/`, then archives it after the run. Manual
 Run `sudo root/collect-root-evidence.sh` when a bundle needs that depth. Output
 goes to `var/root-evidence/<utc>/` with mode 0700 and is **not** auto-bundled.
 Review it and copy only the relevant, redacted excerpts into a vendor ticket.
+See `root/PSTORE.md` for the pstore panic export installed with layer 1.
 
 ## eBPF tracer
 

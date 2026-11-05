@@ -55,6 +55,7 @@ UNIT_FILES=(
   /etc/systemd/system/qa-sentinel.timer
   /etc/systemd/system/qa-sentinel-deep.service
   /etc/systemd/system/qa-sentinel-deep.path
+  /etc/systemd/system/qa-pstore-export.service
 )
 AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/qa-sentinels-logs.desktop"
 BUILT=(
@@ -119,9 +120,13 @@ fi
 
 # ---------------------------------------------------------------- services
 if [[ ${#found_units[@]} -gt 0 ]]; then
+  unit_names=()
+  for unit in "${found_units[@]}"; do
+    unit_names+=("$(basename "$unit")")
+  done
   if command -v systemctl >/dev/null 2>&1; then
-    try "${PRIV[@]}" systemctl disable --now qa-sentinel.timer qa-sentinel-deep.path
-    try "${PRIV[@]}" systemctl stop qa-sentinel.service qa-sentinel-deep.service
+    try "${PRIV[@]}" systemctl disable --now "${unit_names[@]}"
+    try "${PRIV[@]}" systemctl stop "${unit_names[@]}"
   fi
   try "${PRIV[@]}" rm -f "${found_units[@]}"
   if command -v systemctl >/dev/null 2>&1; then

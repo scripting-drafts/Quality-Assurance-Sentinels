@@ -9,6 +9,16 @@ BIN = ROOT / "bin"
 VAR = ROOT / "var"
 DB_PATH = VAR / "sentinels.db"
 
+# systemd-pstore moves EFI pstore records here after the next boot. The
+# archive is root-owned; root/pstore-export.sh writes panic-only summaries to
+# PSTORE_EXPORT_DIR so the unprivileged sentinel can read them.
+PSTORE_ARCHIVE_DIR = pathlib.Path(
+    os.environ.get("QA_PSTORE_ARCHIVE_DIR", "/var/lib/systemd/pstore")
+)
+PSTORE_EXPORT_DIR = pathlib.Path(
+    os.environ.get("QA_PSTORE_EXPORT_DIR", str(VAR / "pstore"))
+)
+
 JOURNAL_DIR = ROOT / "journal"
 REPORT_DIR = JOURNAL_DIR / "reports"
 EVIDENCE_DIR = ROOT / "evidence"
@@ -97,6 +107,6 @@ def ensure_dirs() -> None:
     for d in (
         VAR, JOURNAL_DIR, REPORT_DIR, EVIDENCE_DIR, TICKET_DIR, DRAFT_DIR,
         TRIAGE_DIR, DEEP_DIR, DEEP_REQUEST_DIR, DEEP_ARCHIVE_DIR, CONFIG_DIR,
-        RAISE_DIR, STANDBY_DIR, REJECT_DIR,
+        RAISE_DIR, STANDBY_DIR, REJECT_DIR, PSTORE_EXPORT_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)

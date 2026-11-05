@@ -724,6 +724,141 @@ class NotificationFlowTests(unittest.TestCase):
         self.assertEqual(first, crosscheck._drift_key(stale, missing, ready))
         self.assertNotEqual(first, crosscheck._drift_key(stale, missing, [{"key": "c"}]))
 
+    def test_available_uses_the_session_bus_not_display(self):
+        from unittest import mock
+        from sentinels import notify
+
+        with mock.patch.object(notify.shutil, "which", return_value="/usr/bin/notify-send"), \
+             mock.patch.object(notify, "_gi_available", return_value=False), \
+             mock.patch.object(notify, "_session_bus",
+                               return_value="unix:path=/run/user/1000/bus"), \
+             mock.patch.dict(notify.os.environ,
+                             {"DISPLAY": "", "WAYLAND_DISPLAY": ""}):
+            self.assertEqual(notify.available(), (True, "ok"))
+
+    def test_available_requires_a_session_bus(self):
+        from unittest import mock
+        from sentinels import notify
+
+        with mock.patch.object(notify.shutil, "which", return_value="/usr/bin/notify-send"), \
+             mock.patch.object(notify, "_gi_available", return_value=False), \
+             mock.patch.object(notify, "_session_bus", return_value=None):
+            ok, why = notify.available()
+        self.assertFalse(ok)
+        self.assertIn("session bus", why)
+
+    def test_pygobject_is_a_notification_backend_without_notify_send(self):
+        from unittest import mock
+        from sentinels import notify
+
+        with mock.patch.object(notify.shutil, "which", return_value=None), \
+             mock.patch.object(notify, "_gi_available", return_value=True), \
+             mock.patch.object(notify, "_session_bus", return_value="unix:path=bus"):
+            self.assertEqual(notify.available(), (True, "ok"))
+
+    def test_plain_send_falls_back_to_pygobject(self):
+        from unittest import mock
+        from sentinels import notify
+
+        with mock.patch.object(notify.shutil, "which", return_value=None), \
+             mock.patch.object(notify, "_gi_available", return_value=True), \
+             mock.patch.object(notify, "_gi_send",
+                               return_value=(True, "sent (D-Bus)")) as gi_send:
+            result = notify._plain_send("t", "b", "normal")
+        self.assertEqual(result, (True, "sent (D-Bus)"))
+        gi_send.assert_called_once()
+
+    def test_headless_delivery_keeps_the_message(self):
+        from unittest import mock
+        from sentinels import notify
+
+        with mock.patch.object(notify, "available", return_value=(True, "ok")), \
+             mock.patch.object(notify, "_gi_available", return_value=True), \
+             mock.patch.object(notify, "_graphical_session", return_value=False), \
+             mock.patch.object(notify, "_spawn_click_helper") as spawn, \
+             mock.patch.object(notify, "_plain_send",
+                               return_value=(True, "sent")) as plain:
+            ok, detail = notify.send("t", "b", path="/tmp/x.md")
+        self.assertTrue(ok)
+        self.assertIn("no graphical session", detail)
+        plain.assert_called_once()
+        spawn.assert_not_called()
+
+    def test_env_prepends_the_repository_to_pythonpath(self):
+        import os
+        from unittest import mock
+        from sentinels import notify
+
+        with mock.patch.dict(notify.os.environ,
+                             {"PYTHONPATH": "/somewhere/else"}, clear=True):
+            env = notify._env()
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(parts[0], str(notify.config.ROOT))
+        self.assertEqual(parts[-1], "/somewhere/else")
+
+    def test_click_helper_startup_failure_is_not_delivery(self):
+        import subprocess
+        from unittest import mock
+        from sentinels import notify
+
+        class Dead:
+            def wait(self, timeout=None):
+                return 1
+
+        class Alive:
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("helper", timeout)
+
+        with mock.patch.object(notify.subprocess, "Popen", return_value=Dead()):
+            self.assertFalse(notify._spawn_click_helper(
+                "/tmp/x.md", "t", "b", "normal"
+            ))
+        with mock.patch.object(notify.subprocess, "Popen", return_value=Alive()):
+            self.assertTrue(notify._spawn_click_helper(
+                "/tmp/x.md", "t", "b", "normal"
+            ))
+
+    def test_claim_has_exactly_one_owner(self):
+        from sentinels import notify
+
+        conn = self._conn()
+        self._add(conn, "a")
+        row = dict(conn.execute(
+            "SELECT * FROM notifications WHERE key='a'"
+        ).fetchone())
+        self.assertTrue(notify._claim(conn, row, "2026-11-05T12:00:00Z"))
+        self.assertFalse(notify._claim(conn, row, "2026-11-05T12:00:00Z"))
+        current = conn.execute(
+            "SELECT attempts FROM notifications WHERE key='a'"
+        ).fetchone()
+        self.assertEqual(current["attempts"], 1)
+
+    def test_supersede_replaces_only_undelivered_older_rows(self):
+        from sentinels import notify
+
+        conn = self._conn()
+        self._add(conn, "old")
+        conn.execute(
+            "INSERT INTO notifications(ts,kind,key,title,body,delivered)"
+            " VALUES('2026-11-05T00:00:00Z','draft','done','t','b',1)"
+        )
+        self.assertTrue(notify.enqueue(
+            conn, "draft", "new", "t", "b", supersede=True
+        ))
+        keys = {r["key"] for r in conn.execute("SELECT key FROM notifications")}
+        self.assertEqual(keys, {"new", "done"})
+
+    def test_no_drafts_clears_a_pending_digest(self):
+        from unittest import mock
+        from sentinels import notify
+
+        conn = self._conn()
+        self._add(conn, "drafts|old")
+        with mock.patch("sentinels.correlate.aggregate", return_value=[]):
+            result = notify.collect(conn)
+        self.assertEqual(result["queued"], 0)
+        self.assertEqual(notify.pending_count(conn), 0)
+
     def test_notify_cli_fails_when_drain_has_failures(self):
         from contextlib import contextmanager
         from types import SimpleNamespace
@@ -1545,6 +1680,7 @@ class NotificationTraceCrosscheckTests(unittest.TestCase):
 
         with mock.patch.object(notify, "available", return_value=(True, "ok")), \
              mock.patch.object(notify, "_gi_available", return_value=True), \
+             mock.patch.object(notify, "_graphical_session", return_value=True), \
              mock.patch.object(notify, "_spawn_click_helper", return_value=True) as spawn, \
              mock.patch.object(notify, "_plain_send", return_value=(True, "sent")) as plain:
             ok, _ = notify.send("t", "b", path="/tmp/x.md")

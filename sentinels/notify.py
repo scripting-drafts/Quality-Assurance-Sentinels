@@ -9,8 +9,9 @@ Click handling needs the freedesktop notification action API, which
 delivered over D-Bus with a `default` action and a detached waiter opens the
 file; otherwise it degrades to a plain, unclickable notification and says so.
 
-Delivery is best-effort and never blocks a job: no session bus, no notifier, no
-problem — the row stays queued and `qa notify` reports it honestly.
+Delivery is best-effort: no session bus or notifier leaves the row queued and
+`qa notify` reports it honestly. Send attempts are bounded so a dead backend
+cannot hang a cycle indefinitely.
 """
 from __future__ import annotations
 
@@ -27,22 +28,53 @@ APP = "qa-sentinels"
 
 
 # ---------------------------------------------------------------- environment
+def _runtime_dir() -> str:
+    return f"/run/user/{os.getuid()}"
+
+
+def _session_bus() -> str | None:
+    """Address of the user session bus, even when cron scrubbed the env."""
+    bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+    if bus:
+        return bus
+    path = os.path.join(_runtime_dir(), "bus")
+    if os.path.exists(path):
+        return f"unix:path={path}"
+    return None
+
+
+def _graphical_session() -> bool:
+    """True only when a click could actually open a file."""
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def _env() -> dict:
     env = dict(os.environ)
-    if not env.get("DBUS_SESSION_BUS_ADDRESS"):
-        bus = f"/run/user/{os.getuid()}/bus"
-        if os.path.exists(bus):
-            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
-    if not env.get("PYTHONPATH"):
-        env["PYTHONPATH"] = str(config.ROOT)
+    bus = _session_bus()
+    if bus and not env.get("DBUS_SESSION_BUS_ADDRESS"):
+        env["DBUS_SESSION_BUS_ADDRESS"] = bus
+    if not env.get("XDG_RUNTIME_DIR") and os.path.isdir(_runtime_dir()):
+        env["XDG_RUNTIME_DIR"] = _runtime_dir()
+    # The detached click helper imports sentinels; keep the repository first
+    # even if the caller already exported an unrelated PYTHONPATH.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(config.ROOT)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
     return env
 
 
 def available() -> tuple[bool, str]:
-    if shutil.which("notify-send") is None:
-        return False, "notify-send not installed"
-    if not _env().get("DISPLAY") and not _env().get("WAYLAND_DISPLAY"):
-        return False, "no graphical session (DISPLAY/WAYLAND_DISPLAY unset)"
+    """Can a notification reach the desktop?
+
+    Delivery is a D-Bus operation; DISPLAY is only needed later, to open a
+    file on click. Cron has the session bus path but usually no DISPLAY, so
+    requiring a graphical variable here would queue every scheduled alert
+    forever.
+    """
+    if shutil.which("notify-send") is None and not _gi_available():
+        return False, "no notification backend (notify-send or PyGObject)"
+    if not _session_bus():
+        return False, "no session bus (DBUS_SESSION_BUS_ADDRESS unset)"
     return True, "ok"
 
 
@@ -90,18 +122,63 @@ def send(title: str, body: str, urgency: str = "normal",
     if not ok:
         return False, why
     if path:
-        if _gi_available():
+        if _gi_available() and _graphical_session():
             if _spawn_click_helper(path, title, body, urgency):
                 return True, "sent (click opens the markdown)"
             return False, "could not spawn the click helper"
+        # A click cannot open anything without a desktop session. Deliver the
+        # content anyway rather than dropping an alert on a headless cycle.
         ok, why = _plain_send(title, body, urgency)
         if ok:
+            if not _graphical_session():
+                return True, f"{why} (click support unavailable: no graphical session)"
             return True, f"{why} (click support unavailable: PyGObject missing)"
         return ok, why
     return _plain_send(title, body, urgency)
 
 
+def _gi_send(title: str, body: str, urgency: str) -> tuple[bool, str]:
+    """Plain D-Bus delivery when notify-send is not installed."""
+    bus_address = _session_bus()
+    if bus_address and not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        # Gio reads the address from the process environment, unlike
+        # notify-send which gets the prepared env below.
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = bus_address
+    try:
+        import gi
+
+        gi.require_version("Gio", "2.0")
+        gi.require_version("GLib", "2.0")
+        from gi.repository import Gio, GLib
+
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        proxy = Gio.DBusProxy.new_sync(
+            bus, Gio.DBusProxyFlags.NONE, None,
+            "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications", None,
+        )
+        hints = {
+            "urgency": GLib.Variant(
+                "y", {"low": 0, "normal": 1, "critical": 2}.get(urgency, 1)
+            ),
+        }
+        proxy.call_sync(
+            "Notify",
+            GLib.Variant("(susssasa{sv}i)", (
+                APP, 0, "", title, body, [], hints, 0,
+            )),
+            Gio.DBusCallFlags.NONE, -1, None,
+        )
+    except Exception as exc:  # noqa: BLE001 - optional backend
+        return False, str(exc)[:200]
+    return True, "sent (D-Bus)"
+
+
 def _plain_send(title: str, body: str, urgency: str) -> tuple[bool, str]:
+    if shutil.which("notify-send") is None:
+        if _gi_available():
+            return _gi_send(title, body, urgency)
+        return False, "notify-send not installed"
     try:
         proc = subprocess.run(
             ["notify-send", "-a", APP, "-u", urgency, "-t", "0", "--",
@@ -124,14 +201,20 @@ def _spawn_click_helper(path: str, title: str, body: str, urgency: str) -> bool:
         "QA_NOTIFY_URGENCY": urgency,
     })
     try:
-        subprocess.Popen(  # noqa: S603 - fixed argv
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv
             [sys.executable, "-m", "sentinels.notify", "--wait-open"],
             cwd=str(config.ROOT), env=env, start_new_session=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except OSError:
         return False
-    return True
+    # A helper that dies during import or before its D-Bus Notify call must
+    # not be recorded as delivered. A healthy waiter lives for hours, so the
+    # short wait only catches startup failures.
+    try:
+        return proc.wait(timeout=0.5) == 0
+    except subprocess.TimeoutExpired:
+        return True
 
 
 def _wait_open_main() -> int:
@@ -170,12 +253,15 @@ def _wait_open_main() -> int:
     state = {"opened": False}
 
     def on_signal(_proxy, _sender, signal, params):
-        if signal != "ActionInvoked":
-            return
-        got_id, action = params.unpack()
+        got_id, value = params.unpack()
         if got_id != notification_id:
             return
-        if action in ("default", "open"):
+        if signal == "NotificationClosed":
+            loop.quit()
+            return
+        if signal != "ActionInvoked":
+            return
+        if value in ("default", "open"):
             ok, detail = open_target(path)
             state["opened"] = ok
             print(f"opened={ok} {detail}", flush=True)
@@ -193,14 +279,33 @@ def _wait_open_main() -> int:
 
 # ---------------------------------------------------------------- queue
 def enqueue(conn, kind: str, key: str, title: str, body: str,
-            detail: str = "", path: str | None = None) -> bool:
-    """Queue once per key. Returns True when it is new."""
+            detail: str = "", path: str | None = None,
+            supersede: bool = False) -> bool:
+    """Queue once per key. Returns True when it is new.
+
+    ``supersede`` drops undelivered rows of the same kind with another key
+    first, so the pop-up that eventually arrives describes the current state
+    instead of an older state from before a delivery outage.
+    """
+    if supersede:
+        conn.execute(
+            "DELETE FROM notifications WHERE delivered=0 AND kind=? AND key<>?",
+            (kind, key),
+        )
     cur = conn.execute(
         "INSERT OR IGNORE INTO notifications(ts, kind, key, title, body, detail, path)"
         " VALUES(?,?,?,?,?,?,?)",
         (iso(), kind, key, title, body[:1000], detail[:2000], path),
     )
     return cur.rowcount > 0
+
+
+def clear_pending(conn, kind: str) -> int:
+    """Drop queued alerts for a condition that no longer holds."""
+    cur = conn.execute(
+        "DELETE FROM notifications WHERE delivered=0 AND kind=?", (kind,)
+    )
+    return cur.rowcount
 
 
 def _drafts_index(conn) -> str | None:
@@ -269,11 +374,12 @@ def collect(conn) -> dict:
     if drafts:
         digest = sha256_text("|".join(sorted(d["issue_key"] for d in drafts)))[:16]
         key = f"drafts|{digest}"
-        # a newer digest supersedes older undelivered ones; otherwise every
-        # draft-set change during an outage leaves another stale digest queued
-        conn.execute(
-            "DELETE FROM notifications WHERE delivered=0 AND kind='draft' AND key<>?",
-            (key,),
+        row = conn.execute(
+            "SELECT path FROM notifications WHERE key=?", (key,)
+        ).fetchone()
+        path = (
+            row["path"] if row and row["path"] and os.path.exists(row["path"])
+            else _drafts_index(conn)
         )
         vendors = sorted({d["vendor"] for d in drafts})
         body = "\n".join(f"- {d['vendor']}: {d['title'][:110]}" for d in drafts[:8])
@@ -284,21 +390,40 @@ def collect(conn) -> dict:
             f"{len(drafts)} ticket draft(s) ready ({', '.join(vendors)})",
             body,
             detail=str(config.DRAFT_DIR),
-            path=_drafts_index(conn),
+            path=path,
+            supersede=True,
         )
+    else:
+        clear_pending(conn, "draft")
 
     for cluster in correlate.aggregate(conn, days=30):
         if not cluster["ready"]:
             continue
-        new += enqueue(
-            conn, "correlation", f"corr|{cluster['key']}",
-            f"Consistent fault pattern: {cluster['vendor']}",
+        key = f"corr|{cluster['key']}"
+        row = conn.execute(
+            "SELECT * FROM notifications WHERE key=?", (key,)
+        ).fetchone()
+        if row and row["path"] and os.path.exists(row["path"]):
+            continue
+        title = f"Consistent fault pattern: {cluster['vendor']}"
+        body = (
             f"{cluster['signature'][:120]}\n"
             f"{cluster['boots']} silent stop(s), {cluster['occurrences']} occurrence(s), "
-            f"consistency {cluster['score']}/{cluster['threshold']}",
-            detail=cluster["signature"],
-            path=_correlation_report(conn, cluster),
+            f"consistency {cluster['score']}/{cluster['threshold']}"
         )
+        path = _correlation_report(conn, cluster)
+        if row:
+            # A queued alert whose markdown was removed still needs its click
+            # target. Do not create a second row for the same key.
+            conn.execute(
+                "UPDATE notifications SET title=?, body=?, detail=?, path=? WHERE key=?",
+                (title, body[:1000], cluster["signature"][:2000], path, key),
+            )
+        else:
+            new += enqueue(
+                conn, "correlation", key, title, body,
+                detail=cluster["signature"], path=path,
+            )
     return {"queued": new, "pending": pending_count(conn)}
 
 
@@ -354,11 +479,29 @@ def _purge(conn) -> None:
     conn.execute("DELETE FROM notifications WHERE delivered=0 AND ts < ?", (pending,))
 
 
+def _claim(conn, row: dict, attempt_ts: str) -> bool:
+    """Take one row before sending it.
+
+    ``attempts`` and ``last_attempt`` act as an optimistic version: the update
+    only matches the values read by ``_due_pending``. SQLite serialises writers,
+    so a concurrent ``qa notify --drain`` cannot send the same row twice.
+    """
+    cur = conn.execute(
+        "UPDATE notifications SET attempts=attempts+1, last_attempt=?,"
+        " last_error=NULL WHERE id=? AND delivered=0 AND attempts=?"
+        " AND COALESCE(last_attempt,'')=?",
+        (attempt_ts, row["id"], row["attempts"], row["last_attempt"] or ""),
+    )
+    return cur.rowcount == 1
+
+
 def drain(conn, limit: int = 5) -> dict:
     """Deliver due notifications. Failures stay queued with backoff, never lost."""
     sent, failed = 0, []
     attempt_ts = iso()
     for row in _due_pending(conn, limit):
+        if not _claim(conn, row, attempt_ts):
+            continue
         ok, why = send(
             row["title"], row["body"],
             urgency="critical" if row["kind"] == "correlation" else "normal",
@@ -366,18 +509,19 @@ def drain(conn, limit: int = 5) -> dict:
         )
         if ok:
             conn.execute(
-                "UPDATE notifications SET delivered=1, attempts=attempts+1,"
-                " last_attempt=?, last_error=NULL WHERE id=?",
-                (attempt_ts, row["id"]),
+                "UPDATE notifications SET delivered=1, last_error=NULL WHERE id=?",
+                (row["id"],),
             )
             sent += 1
         else:
             conn.execute(
-                "UPDATE notifications SET attempts=attempts+1,"
-                " last_attempt=?, last_error=? WHERE id=?",
-                (attempt_ts, why[:300], row["id"]),
+                "UPDATE notifications SET last_error=? WHERE id=?",
+                (why[:300], row["id"]),
             )
             failed.append({"key": row["key"], "reason": why, "attempts": row["attempts"] + 1})
+        # Delivery already happened; make the claim/result durable before the
+        # next send. Otherwise a later rollback would retry and duplicate it.
+        conn.commit()
     _purge(conn)
     return {"sent": sent, "failed": failed, "pending": pending_count(conn)}
 

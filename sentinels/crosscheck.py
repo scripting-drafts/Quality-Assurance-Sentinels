@@ -80,7 +80,11 @@ def run(conn, days: int = 30, deep: bool = False, notify_drift: bool = True) -> 
                 f"QA cross-check: {drift} drift item(s)",
                 body[:400],
                 detail=str(detail)[:1500],
+                supersede=True,
             )
+    elif notify_drift:
+        # Drift was resolved before its alert reached the desktop.
+        notify.clear_pending(conn, "crosscheck")
     return {
         "drafts": len(drafts),
         "reproducible_issues": len(current),

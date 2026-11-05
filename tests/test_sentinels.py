@@ -1312,6 +1312,157 @@ class RaiseGateTests(unittest.TestCase):
             self.assertEqual(manifest["evidence_files"]["ticket.md"], digest)
             self.assertEqual(manifest["viability"]["score"], 6)
 
+    def test_event_and_correlation_for_one_signature_stage_once(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            raised = root / "raise"
+            event = self._issue(key="k-event", kind="event", count=9)
+            corr = self._issue(key="k-corr", kind="correlation", count=4)
+            for key in ("k-event", "k-corr"):
+                draft = root / f"{key}.md"
+                draft.write_text("# draft\n", encoding="utf-8")
+                conn.execute(
+                    "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+                    " VALUES(datetime('now'),'nvidia',?,? ,?)",
+                    (str(draft), "NVRM: Xid 79", key),
+                )
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"), \
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
+                                   return_value=[event, corr]), \
+                 mock.patch.object(raise_ticket.report, "append_journal"):
+                first = raise_ticket.run(conn, notify_ready=False)
+                second = raise_ticket.run(conn, notify_ready=False)
+
+            self.assertEqual(first["viable"], 1, first)
+            self.assertEqual(len(first["staged"]), 1, first)
+            self.assertEqual(len(first["deduplicated"]), 1, first)
+            self.assertEqual(first["deduplicated"][0]["kept"], "k-corr")
+            self.assertEqual(first["written"], 1)
+            directories = [p for p in raised.iterdir() if p.is_dir()]
+            self.assertEqual(len(directories), 1, directories)
+            manifest = json.loads(
+                (directories[0] / "evidence" / "manifest.json").read_text()
+            )
+            self.assertEqual(manifest["issue_key"], "k-corr")
+            self.assertEqual(second["viable"], 1)
+            self.assertEqual(second["written"], 0)
+            self.assertEqual(len([p for p in raised.iterdir() if p.is_dir()]), 1)
+
+    def test_existing_duplicate_directories_are_merged(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+        from sentinels.util import iso
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            raised = root / "raise"
+            event_dir = raised / "nvidia-event-old"
+            corr_dir = raised / "nvidia-corr-new"
+            event_dir.mkdir(parents=True)
+            corr_dir.mkdir(parents=True)
+            (event_dir / "OLD.txt").write_text("old event\n", encoding="utf-8")
+            for directory, kind, key, generated in (
+                (event_dir, "event", "k-event", "2026-11-01T00:00:00Z"),
+                (corr_dir, "correlation", "k-corr", "2026-11-02T00:00:00Z"),
+            ):
+                (directory / "evidence").mkdir()
+                (directory / "evidence" / "manifest.json").write_text(json.dumps({
+                    "vendor": "nvidia",
+                    "signature": "NVRM: Xid (PCI:0000:01:00): 79",
+                    "kind": kind,
+                    "issue_key": key,
+                    "generated": generated,
+                    "bucket": "raise",
+                    "occurrences": 4,
+                    "last": iso(),
+                }), encoding="utf-8")
+            draft = root / "draft.md"
+            draft.write_text("# draft\n", encoding="utf-8")
+            conn.execute(
+                "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+                " VALUES(datetime('now'),'nvidia',?,?,'k-corr')",
+                (str(draft), "NVRM: Xid 79"),
+            )
+            issue = self._issue(key="k-corr", kind="correlation", count=4)
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"), \
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
+                                   return_value=[issue]), \
+                 mock.patch.object(raise_ticket.report, "append_journal"):
+                result = raise_ticket.run(conn, notify_ready=False)
+
+            self.assertEqual(result["viable"], 1, result)
+            self.assertEqual(len(result["merged_existing"]), 1, result)
+            self.assertFalse(event_dir.exists())
+            self.assertTrue(corr_dir.exists())
+            self.assertFalse((raised / "nvidia-event-old").exists())
+            parked = list(corr_dir.rglob("OLD.txt"))
+            self.assertEqual(len(parked), 1, parked)
+
+    def test_unchanged_ticket_is_not_rewritten(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            draft = root / "draft.md"
+            draft.write_text("# draft\n", encoding="utf-8")
+            conn.execute(
+                "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+                " VALUES(datetime('now'),'nvidia',?,?,'k1')",
+                (str(draft), "NVRM: Xid 79"),
+            )
+            issue = self._issue()
+            raised = root / "raise"
+            patches = [
+                mock.patch.object(config, "RAISE_DIR", raised),
+                mock.patch.object(config, "STANDBY_DIR", root / "standby"),
+                mock.patch.object(config, "REJECT_DIR", root / "rejected"),
+                mock.patch.object(raise_ticket.tickets, "collect_issues",
+                                  return_value=[issue]),
+                mock.patch.object(raise_ticket.report, "append_journal"),
+            ]
+            for patcher in patches:
+                patcher.start()
+            try:
+                first = raise_ticket.run(conn, notify_ready=False)
+                directory = pathlib.Path(first["staged"][0])
+                before = {
+                    name: (directory / name).stat().st_mtime_ns
+                    for name in ("ticket.md", "HOWTO.md",
+                                 "evidence/rows.json", "evidence/manifest.json")
+                }
+                with mock.patch.object(raise_ticket, "stage") as stage:
+                    second = raise_ticket.run(conn, notify_ready=False)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+
+            stage.assert_not_called()
+            self.assertEqual(second["written"], 0)
+            after = {
+                name: (directory / name).stat().st_mtime_ns
+                for name in before
+            }
+            self.assertEqual(before, after)
+
     def test_staged_ticket_is_never_deleted_and_records_history(self):
         import json
         import pathlib

@@ -39,6 +39,10 @@ ENVIRONMENTAL = re.compile(
     r"read-only file system|dns"
 )
 
+# When two clusters share a signature, a correlation carries the silent-stop
+# context; a crash has a stack; a plain event is the weakest form.
+KIND_RANK = {"correlation": 0, "crash": 1, "event": 2}
+
 
 # ---------------------------------------------------------------- assessment
 def _slug(value: str, limit: int = 60) -> str:
@@ -129,10 +133,36 @@ def assess(conn, draft: dict, issue: dict | None, days: int = 30,
     }
 
 
-def _dir_name(draft: dict, issue: dict | None) -> str:
+def _ticket_identity(draft: dict, issue: dict | None) -> tuple[str, str]:
+    """The human-facing identity of a ticket: owner and signature.
+
+    Event and correlation clusters can describe the exact same signature. They
+    are two views of one ticket, not two tickets, so the directory name must
+    not depend on the cluster kind or issue key.
+    """
     vendor = (issue or {}).get("vendor") or draft.get("vendor") or "local"
-    signature = (issue or {}).get("signature") or draft.get("title") or "ticket"
-    return f"{vendor}-{_slug(signature)}-{draft['issue_key'][:8]}"
+    signature = util.redact(
+        (issue or {}).get("signature") or draft.get("title") or "ticket"
+    )
+    return vendor, signature
+
+
+def _identity(vendor: str, signature: str) -> str:
+    return sha256_text(f"{vendor}\0{signature}")[:8]
+
+
+def _dir_name(draft: dict, issue: dict | None) -> str:
+    vendor, signature = _ticket_identity(draft, issue)
+    return f"{vendor}-{_slug(signature)}-{_identity(vendor, signature)}"
+
+
+def _read_manifest(directory) -> dict:
+    path = directory / "evidence" / "manifest.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 # ---------------------------------------------------------------- redaction
@@ -160,14 +190,53 @@ def _write(path, text: str) -> str:
     return sha256_text(text)
 
 
+def _already_staged(directory, issue: dict, bucket: str = "raise") -> bool:
+    """True when this exact issue is already fully staged.
+
+    Re-staging an unchanged ticket every hour only churns mtimes. New
+    occurrences or a different issue still refresh the existing directory.
+    """
+    if not directory.is_dir():
+        return False
+    manifest = _read_manifest(directory)
+    if manifest.get("issue_key") != issue.get("key"):
+        return False
+    if manifest.get("bucket") != bucket:
+        return False
+    if manifest.get("occurrences") != issue.get("count"):
+        return False
+    if manifest.get("last") != issue.get("last"):
+        return False
+    required = ("ticket.md", "HOWTO.md", "evidence/manifest.json",
+                "evidence/rows.json", "evidence/trace.md")
+    return all((directory / rel).exists() for rel in required)
+
+
+def _staged_summary(directory, issue: dict, verdict: dict,
+                    bucket: str = "raise") -> dict:
+    manifest = _read_manifest(directory)
+    return {
+        "directory": str(directory),
+        "issue_key": issue["key"],
+        "vendor": issue["vendor"],
+        "signature": issue["signature"][:120],
+        "bucket": bucket,
+        "files": sorted((manifest.get("evidence_files") or {}).keys()),
+        "manifest_sha256": (manifest.get("evidence_files") or {}).get(
+            "evidence/manifest.json", ""
+        ),
+        "verdict": verdict,
+    }
+
+
 def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
-          root=None, bucket: str = "raise") -> dict:
+          root=None, bucket: str = "raise", name: str | None = None) -> dict:
     """Create the per-ticket directory with its own evidence.
 
     The layout is identical in raise/, rejected/ and standby/, so a ticket
     can move between buckets without losing evidence or history.
     """
-    directory = (root or config.RAISE_DIR) / _dir_name(draft, issue)
+    directory = (root or config.RAISE_DIR) / (name or _dir_name(draft, issue))
     # never rm/rewrite: a staged ticket is a record, not a cache entry
     (directory / "evidence").mkdir(parents=True, exist_ok=True)
 
@@ -308,7 +377,7 @@ def _stamp() -> str:
 
 def _merge_into(source, destination, label: str) -> None:
     """Never delete a staged directory; park the older copy inside the newer."""
-    target = destination / "evidence" / f"prior-{label}-{_stamp()}"
+    target = destination / "evidence" / f"prior-{label}-{_stamp()}-{source.name}"
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(target))
 
@@ -339,6 +408,69 @@ def _bucket_roots() -> dict:
         "standby": config.STANDBY_DIR,
         "rejected": config.REJECT_DIR,
     }
+
+
+def _existing_by_identity() -> dict[str, list[dict]]:
+    """Every staged directory, grouped by its vendor/signature identity."""
+    grouped: dict[str, list[dict]] = {}
+    for bucket, root in _bucket_roots().items():
+        if not root.exists():
+            continue
+        for path in sorted(root.iterdir()):
+            if not path.is_dir():
+                continue
+            manifest = _read_manifest(path)
+            vendor = str(manifest.get("vendor") or "")
+            signature = str(manifest.get("signature") or "")
+            if not vendor or not signature:
+                continue
+            grouped.setdefault(_identity(vendor, signature), []).append({
+                "bucket": bucket,
+                "path": path,
+                "manifest": manifest,
+                "kind": str(manifest.get("kind") or ""),
+                "generated": str(manifest.get("generated") or ""),
+            })
+    return grouped
+
+
+def _dedupe_existing(grouped: dict[str, list[dict]]) -> tuple[dict[str, dict], list[dict]]:
+    """Keep one directory per vendor/signature and park the older copies.
+
+    The duplicate may predate the identity-based naming or be an event and a
+    correlation view of the same signature. Nothing is deleted: the losing
+    directory is moved under the winner's evidence/ as a prior copy.
+    """
+    winners: dict[str, dict] = {}
+    merged: list[dict] = []
+    for ident, items in grouped.items():
+        if len(items) == 1:
+            winners[ident] = items[0]
+            continue
+        winner = min(
+            items,
+            key=lambda item: (
+                item["bucket"] != "raise",
+                KIND_RANK.get(item["kind"], 3),
+                item["generated"],
+                item["path"].name,
+            ),
+        )
+        for item in items:
+            if item is winner:
+                continue
+            _merge_into(item["path"], winner["path"], item["bucket"])
+            _record_event(
+                winner["path"], "dedupe.jsonl", "merged",
+                f"duplicate {item['bucket']}/{item['path'].name}",
+            )
+            merged.append({
+                "ticket": item["path"].name,
+                "kept": winner["path"].name,
+                "bucket": item["bucket"],
+            })
+        winners[ident] = winner
+    return winners, merged
 
 
 def reconcile(conn, desired: dict[str, str],
@@ -503,11 +635,56 @@ def run(conn, days: int = 30, min_count: int | None = None,
     raised, rejected, rejected_staged = [], [], []
     assessments: dict[str, dict] = {}
     desired: dict[str, str] = {}
+    deduplicated: list[dict] = []
+
+    # One ticket per vendor+signature. A correlation and a plain event for the
+    # same signature are two views of one fault; staging both creates the
+    # duplicate directories the raise queue must not contain.
+    groups: dict[str, dict] = {}
     for draft in drafts:
         issue = issues.get(draft["issue_key"])
         verdict = assess(conn, draft, issue, days=days, min_count=min_count)
-        name = _dir_name(draft, issue)
-        assessments[name] = {"draft": draft, "verdict": verdict}
+        vendor, signature = _ticket_identity(draft, issue)
+        ident = _identity(vendor, signature)
+        candidate = {
+            "draft": draft,
+            "issue": issue,
+            "verdict": verdict,
+            "vendor": vendor,
+            "signature": signature,
+            "rank": (
+                0 if verdict["viable"] else 1,
+                KIND_RANK.get((issue or {}).get("kind") or "", 3),
+                -int((issue or {}).get("count") or 0),
+                draft["issue_key"],
+            ),
+        }
+        current = groups.get(ident)
+        if current is None:
+            groups[ident] = candidate
+            continue
+        winner = candidate if candidate["rank"] < current["rank"] else current
+        loser = current if winner is candidate else candidate
+        winner["deduped"] = current.get("deduped", 0) + 1
+        groups[ident] = winner
+        deduplicated.append({
+            "key": loser["draft"]["issue_key"],
+            "kept": winner["draft"]["issue_key"],
+            "vendor": winner["vendor"],
+            "signature": winner["signature"][:120],
+            "kind": (loser["issue"] or {}).get("kind") or "",
+        })
+
+    # Collapse duplicates that are already on disk before deciding what to
+    # stage. The surviving directory name is reused instead of minting a new
+    # one from a different issue key.
+    existing, merged_existing = _dedupe_existing(_existing_by_identity())
+
+    for ident, group in groups.items():
+        draft, issue, verdict = group["draft"], group["issue"], group["verdict"]
+        chosen = existing.get(ident)
+        name = chosen["path"].name if chosen else _dir_name(draft, issue)
+        group["name"] = name
         if verdict["viable"] and issue:
             desired[name] = "raise"
         elif issue and verdict.get("hold_explained"):
@@ -515,6 +692,7 @@ def run(conn, days: int = 30, min_count: int | None = None,
             desired[name] = "rejected"
         else:
             desired[name] = "standby"
+        assessments[name] = {"draft": draft, "verdict": verdict}
         if not (verdict["viable"] and issue):
             rejected.append({
                 "key": draft["issue_key"],
@@ -527,22 +705,36 @@ def run(conn, days: int = 30, min_count: int | None = None,
     # is updated in place instead of duplicated
     moves = reconcile(conn, desired, assessments)
 
-    for draft in drafts:
-        issue = issues.get(draft["issue_key"])
+    written = 0
+    for ident, group in sorted(groups.items()):
+        issue = group["issue"]
         if not issue:
             continue
-        verdict = assessments[_dir_name(draft, issue)]["verdict"]
+        draft, verdict, name = group["draft"], group["verdict"], group["name"]
         if verdict["viable"]:
-            raised.append(stage(conn, draft, issue, verdict, bundle))
+            directory = config.RAISE_DIR / name
+            if _already_staged(directory, issue):
+                raised.append(_staged_summary(directory, issue, verdict))
+            else:
+                raised.append(stage(conn, draft, issue, verdict, bundle, name=name))
+                written += 1
         elif verdict.get("hold_explained"):
-            rejected_staged.append(stage(
-                conn, draft, issue, verdict, bundle,
-                root=config.REJECT_DIR, bucket="rejected",
-            ))
+            directory = config.REJECT_DIR / name
+            if _already_staged(directory, issue, bucket="rejected"):
+                rejected_staged.append(
+                    _staged_summary(directory, issue, verdict, "rejected")
+                )
+            else:
+                rejected_staged.append(stage(
+                    conn, draft, issue, verdict, bundle,
+                    root=config.REJECT_DIR, bucket="rejected", name=name,
+                ))
+                written += 1
 
     config.RAISE_DIR.mkdir(parents=True, exist_ok=True)
     index = ["# Tickets staged for raising", "",
-             f"Generated {iso()} — {len(raised)} viable, {len(rejected)} rejected.", ""]
+             f"Generated {iso()} — {len(raised)} viable, {len(rejected)} rejected, "
+             f"{len(deduplicated)} duplicate(s) skipped.", ""]
     by_vendor: dict[str, list[dict]] = {}
     for item in raised:
         by_vendor.setdefault(item["vendor"], []).append(item)
@@ -553,6 +745,21 @@ def run(conn, days: int = 30, min_count: int | None = None,
             index.append(
                 f"- [`{rel}`]({rel}/ticket.md) — {item['signature']} "
                 f"({item['verdict']['score']}/{item['verdict']['max_score']} checks)"
+            )
+        index.append("")
+    if deduplicated:
+        index += ["## Deduplicated", ""]
+        for item in deduplicated:
+            index.append(
+                f"- {item['vendor']}: {item['signature']} — "
+                f"kept `{item['kept']}`, skipped `{item['key']}`"
+            )
+        index.append("")
+    if merged_existing:
+        index += ["## Merged existing duplicates", ""]
+        for item in merged_existing:
+            index.append(
+                f"- `{item['ticket']}` ({item['bucket']}) → `{item['kept']}`"
             )
         index.append("")
     if rejected:
@@ -577,25 +784,33 @@ def run(conn, days: int = 30, min_count: int | None = None,
             "\n".join(f"- {r['vendor']}: {r['signature']}" for r in raised[:10]) + "\n",
             "raise",
         )
-    if raised and notify_ready:
+    if notify_ready:
         from . import notify
 
-        # identity, not hashes: manifests are regenerated every run and a
-        # hash-based key would pop a notification every 5 minutes.
-        digest = sha256_text("|".join(sorted(r["issue_key"] for r in raised)))[:16]
-        notify.enqueue(
-            conn, "raise", f"raise|{digest}",
-            f"{len(raised)} ticket(s) staged in raise/",
-            "\n".join(f"- {r['vendor']}: {r['signature']}" for r in raised[:6]),
-            detail=str(config.RAISE_DIR),
-            path=str(config.RAISE_DIR / "INDEX.md"),
-        )
+        if raised:
+            # identity, not hashes: manifests are regenerated every run and a
+            # hash-based key would pop a notification every 5 minutes.
+            digest = sha256_text("|".join(sorted(r["issue_key"] for r in raised)))[:16]
+            notify.enqueue(
+                conn, "raise", f"raise|{digest}",
+                f"{len(raised)} ticket(s) staged in raise/",
+                "\n".join(f"- {r['vendor']}: {r['signature']}" for r in raised[:6]),
+                detail=str(config.RAISE_DIR),
+                path=str(config.RAISE_DIR / "INDEX.md"),
+                supersede=True,
+            )
+        else:
+            # Nothing is staged now; an undelivered alert would be misleading.
+            notify.clear_pending(conn, "raise")
 
     return {
         "drafts": len(drafts),
         "viable": len(raised),
         "rejected": len(rejected),
         "staged": [r["directory"] for r in raised],
+        "written": written,
+        "deduplicated": deduplicated,
+        "merged_existing": merged_existing,
         "rejected_staged": [r["directory"] for r in rejected_staged],
         "rejected_keys": [r["key"] for r in rejected],
         "stood_down": moves["stood_down"],

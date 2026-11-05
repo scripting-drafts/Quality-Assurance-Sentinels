@@ -1507,8 +1507,8 @@ class RaiseGateTests(unittest.TestCase):
             self.assertEqual(result["viable"], 1, result)
             directory = pathlib.Path(result["staged"][0])
             self.assertTrue((directory / "ticket.md").exists())
-            self.assertTrue((directory / "evidence" / "rows.json").exists())
-            self.assertFalse((directory / "evidence" / "logs.json").exists())
+            self.assertTrue((directory / "evidence" / "logs.json").exists())
+            self.assertFalse((directory / "evidence" / "rows.json").exists())
             self.assertTrue((directory / "evidence" / "trace.md").exists())
             self.assertTrue((directory / "evidence" / "manifest.json").exists())
             self.assertTrue((directory / "HOWTO.md").exists())
@@ -1524,7 +1524,7 @@ class RaiseGateTests(unittest.TestCase):
             self.assertEqual(manifest["evidence_files"]["ticket.md"], digest)
             self.assertEqual(manifest["viability"]["score"], 6)
 
-    def test_legacy_logs_evidence_is_normalized(self):
+    def test_legacy_rows_evidence_is_normalized(self):
         import json
         import pathlib
         import tempfile
@@ -1535,24 +1535,28 @@ class RaiseGateTests(unittest.TestCase):
             directory = pathlib.Path(tmp)
             evidence = directory / "evidence"
             evidence.mkdir()
-            (evidence / "logs.json").write_text('{"legacy": true}\n', encoding="utf-8")
+            (evidence / "rows.json").write_text('{"legacy": true}\n', encoding="utf-8")
+            (evidence / "prior-rows-20261105T000000Z.json").write_text(
+                '{"older": true}\n', encoding="utf-8"
+            )
             (evidence / "manifest.json").write_text(json.dumps({
-                "evidence_files": {"evidence/logs.json": "old"},
+                "evidence_files": {"evidence/rows.json": "old"},
             }), encoding="utf-8")
             (directory / "HOWTO.md").write_text(
-                "Check `evidence/logs.json`.\n", encoding="utf-8"
+                "Check `evidence/rows.json`.\n", encoding="utf-8"
             )
             raise_ticket._normalize_evidence_names(directory)
 
-            self.assertFalse((evidence / "logs.json").exists())
-            self.assertTrue((evidence / "rows.json").exists())
+            self.assertFalse((evidence / "rows.json").exists())
+            self.assertTrue((evidence / "logs.json").exists())
+            self.assertTrue((evidence / "prior-logs-20261105T000000Z.json").exists())
             manifest = json.loads((evidence / "manifest.json").read_text())
-            self.assertNotIn("evidence/logs.json", manifest["evidence_files"])
+            self.assertNotIn("evidence/rows.json", manifest["evidence_files"])
             self.assertEqual(
-                manifest["evidence_files"]["evidence/rows.json"],
+                manifest["evidence_files"]["evidence/logs.json"],
                 sha256_text('{"legacy": true}\n'),
             )
-            self.assertIn("evidence/rows.json", (directory / "HOWTO.md").read_text())
+            self.assertIn("evidence/logs.json", (directory / "HOWTO.md").read_text())
 
     def test_event_and_correlation_for_one_signature_stage_once(self):
         import json
@@ -1689,7 +1693,7 @@ class RaiseGateTests(unittest.TestCase):
                 before = {
                     name: (directory / name).stat().st_mtime_ns
                     for name in ("ticket.md", "HOWTO.md",
-                                 "evidence/rows.json", "evidence/manifest.json")
+                                 "evidence/logs.json", "evidence/manifest.json")
                 }
                 with mock.patch.object(raise_ticket, "stage") as stage:
                     second = raise_ticket.run(conn, notify_ready=False)

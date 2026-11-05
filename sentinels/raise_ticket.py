@@ -16,13 +16,13 @@ Layout (one directory per ticket, never a flat pile):
     raise/<vendor>-<slug>-<key8>/
         ticket.md            the redacted draft, ready to post
         HOWTO.md             what to do with it, and what not to omit
-        evidence/rows.json   the exact observations behind it (redacted)
+        evidence/logs.json   the exact observations behind it (redacted)
         evidence/trace.md    signature → events → stops → correlation → draft
         evidence/manifest.json  hashes, provenance, scores
         evidence/*.jsonl     append-only audit records
 
-Naming convention: ``rows.json`` is the active evidence snapshot; ``*.jsonl``
-is append-only history. Legacy ``logs.json`` is migrated automatically.
+Naming convention: ``logs.json`` is the active evidence snapshot; ``*.jsonl``
+is append-only history. Legacy ``rows.json`` is migrated automatically.
 """
 from __future__ import annotations
 
@@ -48,11 +48,11 @@ ENVIRONMENTAL = re.compile(
 KIND_RANK = {"correlation": 0, "crash": 1, "event": 2}
 
 # Ticket evidence naming convention:
-#   rows.json   snapshot of the observations behind the ticket
+#   logs.json   snapshot of the observations behind the ticket
 #   *.jsonl     append-only audit records (history, standby, rejected, dedupe)
 #   *.md        human-readable reports and instructions
-EVIDENCE_ROWS = "rows.json"
-EVIDENCE_ROWS_LEGACY = "logs.json"
+EVIDENCE_LOGS = "logs.json"
+EVIDENCE_LOGS_LEGACY = "rows.json"
 
 
 # ---------------------------------------------------------------- assessment
@@ -231,7 +231,7 @@ def _already_staged(directory, issue: dict, bucket: str = "raise") -> bool:
     if manifest.get("last") != issue.get("last"):
         return False
     required = ("ticket.md", "HOWTO.md", "evidence/manifest.json",
-                f"evidence/{EVIDENCE_ROWS}", "evidence/trace.md")
+                f"evidence/{EVIDENCE_LOGS}", "evidence/trace.md")
     return all((directory / rel).exists() for rel in required)
 
 
@@ -275,8 +275,8 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
     hashes["ticket.md"] = _write(directory / "ticket.md", ticket_text)
 
     rows = _redact_rows(issue.get("rows") or [])
-    hashes[f"evidence/{EVIDENCE_ROWS}"] = _write(
-        directory / "evidence" / EVIDENCE_ROWS,
+    hashes[f"evidence/{EVIDENCE_LOGS}"] = _write(
+        directory / "evidence" / EVIDENCE_LOGS,
         json.dumps(rows, indent=2, sort_keys=True, default=str) + "\n",
     )
 
@@ -403,23 +403,41 @@ def _stamp() -> str:
     return utcnow().strftime("%Y%m%dT%H%M%SZ")
 
 
+def _prior_logs_name(evidence, suffix: str | None = None):
+    """Return a unique ``prior-logs-*.json`` path."""
+    base = f"prior-logs-{suffix or _stamp()}"
+    path = evidence / f"{base}.json"
+    counter = 1
+    while path.exists():
+        path = evidence / f"{base}-{counter}.json"
+        counter += 1
+    return path
+
+
 def _normalize_evidence_names(directory) -> None:
     """Apply the ticket evidence naming convention to one staged directory.
 
-    ``rows.json`` is the active snapshot. Legacy ``logs.json`` is renamed when
-    it is the only file, or preserved as ``prior-rows-*.json`` when a newer
-    snapshot already exists.
+    ``logs.json`` is the active snapshot. Legacy ``rows.json`` is promoted to
+    that name; if both exist, the newer file wins and the older one is kept as
+    ``prior-logs-*.json``. Earlier ``prior-rows-*`` archives are renamed too.
     """
     evidence = directory / "evidence"
-    legacy = evidence / EVIDENCE_ROWS_LEGACY
-    rows = evidence / EVIDENCE_ROWS
-    if not legacy.exists():
-        return
+    active = evidence / EVIDENCE_LOGS
+    legacy = evidence / EVIDENCE_LOGS_LEGACY
     try:
-        if not rows.exists():
-            legacy.rename(rows)
-        else:
-            legacy.rename(evidence / f"prior-rows-{_stamp()}.json")
+        if legacy.exists() and active.exists():
+            if legacy.stat().st_mtime >= active.stat().st_mtime:
+                active.rename(_prior_logs_name(evidence))
+                legacy.rename(active)
+            else:
+                legacy.rename(_prior_logs_name(evidence))
+        elif legacy.exists():
+            legacy.rename(active)
+        for old in evidence.glob("prior-rows-*.json"):
+            suffix = old.name[len("prior-rows-"):]
+            if suffix.endswith(".json"):
+                suffix = suffix[:-5]
+            old.rename(_prior_logs_name(evidence, suffix))
     except OSError:
         return
 
@@ -427,9 +445,9 @@ def _normalize_evidence_names(directory) -> None:
     if howto.exists():
         try:
             text = howto.read_text(encoding="utf-8", errors="replace")
-            if "evidence/logs.json" in text:
-                _write(howto, text.replace("evidence/logs.json",
-                                            f"evidence/{EVIDENCE_ROWS}"))
+            if "evidence/rows.json" in text:
+                _write(howto, text.replace("evidence/rows.json",
+                                            f"evidence/{EVIDENCE_LOGS}"))
         except OSError:
             pass
 
@@ -445,15 +463,15 @@ def _normalize_evidence_names(directory) -> None:
         return
     changed = False
     for key in list(files):
-        if key.endswith(EVIDENCE_ROWS_LEGACY):
+        if key.endswith(EVIDENCE_LOGS_LEGACY):
             del files[key]
             changed = True
-    if rows.exists():
+    if active.exists():
         try:
-            digest = sha256_text(rows.read_text(encoding="utf-8", errors="replace"))
+            digest = sha256_text(active.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             digest = ""
-        key = f"evidence/{EVIDENCE_ROWS}"
+        key = f"evidence/{EVIDENCE_LOGS}"
         if digest and files.get(key) != digest:
             files[key] = digest
             changed = True
@@ -682,7 +700,7 @@ Viability: {verdict['score']}/{verdict['max_score']} checks passed.
 Vendor: **{issue['vendor']}** — {issue['kind']} cluster `{issue['key']}`
 
 1. Read `ticket.md`. It is already redacted; do not add host or identity data.
-2. Check `evidence/rows.json` and `evidence/trace.md` still describe what you saw.
+2. Check `evidence/logs.json` and `evidence/trace.md` still describe what you saw.
 3. Attach the evidence bundle named in `evidence/manifest.json` (verify its SHA-256).
 4. Post through the vendor channel in `ticket.md`. Submission is manual by design.
 5. Keep `evidence/manifest.json`: it is what makes this ticket auditable later.

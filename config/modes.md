@@ -7,7 +7,9 @@ environment variable read by `bin/qa`.
   warnings), including every process that logs.
 - `QA_JOURNAL_PRIORITY=debug` — go further; expect a very large database.
 - `QA_KEEP_FOREVER=1` — disable event/sample/process/inventory retention.
-- `QA_MAX_TICKETS=0` — no limit on vendor drafts per run.
+- `QA_MAX_TICKETS=10` — draft cap per run; substantive issues are prioritised
+  before the cap so one-off warnings cannot crowd out high-volume faults.
+  Set `0` for no limit.
 - `QA_EVIDENCE_EVENT_LIMIT=0` — put every event in an evidence bundle.
 - `QA_INVENTORY_INTERVAL_S=10800` — base inventory period.
 - `QA_INVENTORY_MIN_S=900`, `QA_INVENTORY_MAX_S=43200` — adaptive floor/ceiling.

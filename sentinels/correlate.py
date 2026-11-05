@@ -16,10 +16,11 @@ different cadence and must not slow the sampler down.
 """
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 from . import classify, config, db, report
-from .util import iso, parse_iso, sha256_text, utcnow
+from .util import iso, parse_iso, redact, sha256_text, utcnow
 
 
 # ---------------------------------------------------------------- ownership
@@ -50,23 +51,36 @@ def _window(boot: dict) -> tuple[str, str]:
     )
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _display_text(value: str, fallback: str) -> str:
+    text = (value or "").strip().splitlines()
+    text = _ANSI.sub("", text[0] if text else "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return redact(text)[:200] or fallback
+
+
 # ---------------------------------------------------------------- clustering
 def clusters_for_boot(conn, boot: dict) -> list[dict]:
     start, end = _window(boot)
     clusters: dict[tuple[str, str], dict] = {}
 
     def bump(vendor: str, component: str, signature: str, ts: str, rows: list[dict],
-             occurrences: int, is_crash: bool) -> None:
+             occurrences: int, is_crash: bool, display: str) -> None:
         key = (vendor, signature)
         item = clusters.setdefault(
             key,
             {
                 "boot_id": boot["boot_id"], "vendor": vendor, "component": component,
-                "signature": signature, "occurrences": 0, "crashes": 0,
+                "signature": signature, "display": display,
+                "occurrences": 0, "crashes": 0,
                 "window_start": start, "window_end": end,
                 "first": ts, "last": ts, "rows": [],
             },
         )
+        if not item.get("display"):
+            item["display"] = display
         item["occurrences"] += occurrences
         if is_crash:
             item["crashes"] += 1
@@ -85,11 +99,14 @@ def clusters_for_boot(conn, boot: dict) -> list[dict]:
         if view is None or not (start <= view <= end):
             continue
         vendor, component = component_for_event(row.get("unit"), row.get("message"))
+        message = row.get("message") or ""
+        signature = classify.signature(message)
         bump(
-            vendor, component, classify.signature(row.get("message") or ""),
-            row["ts"], {"message": (row.get("message") or "")[:1000],
+            vendor, component, signature,
+            row["ts"], {"message": message[:1000],
                         "unit": row.get("unit"), "severity": row.get("severity")},
             int(row.get("count") or 1), False,
+            _display_text(message, signature),
         )
 
     for row in conn.execute(
@@ -97,13 +114,15 @@ def clusters_for_boot(conn, boot: dict) -> list[dict]:
     ):
         row = dict(row)
         vendor, component = component_for_crash(row)
+        signature = f"{component} {row.get('sig')}"
         bump(
-            vendor, component, f"{component} {row.get('sig')}",
+            vendor, component, signature,
             row["ts"],
             {"sig": row.get("sig"), "comm": row.get("comm"),
              "cpus_allowed": row.get("cpus_allowed"),
              "core2_involved": row.get("core2_involved")},
             1, True,
+            _display_text(signature, signature),
         )
 
     return list(clusters.values())
@@ -123,11 +142,12 @@ def correlate(conn, days: int = 30, notify: bool = True) -> dict:
         for cluster in clusters_for_boot(conn, boot):
             conn.execute(
                 "INSERT OR REPLACE INTO correlations"
-                "(boot_id, vendor, component, signature, occurrences, crashes,"
-                " window_start, window_end, created) VALUES(?,?,?,?,?,?,?,?,?)",
+                "(boot_id, vendor, component, signature, display, occurrences, crashes,"
+                " window_start, window_end, created) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     cluster["boot_id"], cluster["vendor"], cluster["component"],
-                    cluster["signature"], cluster["occurrences"], cluster["crashes"],
+                    cluster["signature"], cluster["display"],
+                    cluster["occurrences"], cluster["crashes"],
                     cluster["window_start"], cluster["window_end"], iso(),
                 ),
             )
@@ -141,7 +161,7 @@ def correlate(conn, days: int = 30, notify: bool = True) -> dict:
         "clusters": written,
         "ticket_ready": len(ready),
         "ready": [
-            {"vendor": c["vendor"], "signature": c["signature"][:120],
+            {"vendor": c["vendor"], "signature": c["display"][:120],
              "boots": c["boots"], "occurrences": c["occurrences"]}
             for c in ready
         ],
@@ -155,9 +175,10 @@ def _notify_new(conn, ready: list[dict]) -> None:
         if db.meta_get(conn, key):
             continue
         db.meta_set(conn, key, iso())
+        shown = cluster.get("display") or cluster["signature"]
         report.append_journal(
             conn,
-            f"Correlated pattern for {cluster['vendor']}: {cluster['signature'][:80]}",
+            f"Correlated pattern for {cluster['vendor']}: {shown[:80]}",
             f"- Silent stops involved: **{cluster['boots']}**\n"
             f"- Occurrences in their death windows: **{cluster['occurrences']}** "
             f"(crashes {cluster['crashes']})\n"
@@ -190,11 +211,15 @@ def aggregate(conn, days: int = 30) -> list[dict]:
             key,
             {
                 "vendor": row["vendor"], "component": row["component"],
-                "signature": row["signature"], "boots": 0, "occurrences": 0,
+                "signature": row["signature"],
+                "display": row.get("display") or row["signature"],
+                "boots": 0, "occurrences": 0,
                 "crashes": 0, "first": row["stop_ts"], "last": row["stop_ts"],
                 "stop_ts": [],
             },
         )
+        if not item.get("display"):
+            item["display"] = row["display"] or row["signature"]
         item["boots"] += 1
         item["occurrences"] += int(row["occurrences"] or 0)
         item["crashes"] += int(row["crashes"] or 0)
@@ -244,13 +269,14 @@ def ticket_candidates(conn, days: int = 30) -> list[dict]:
     for cluster in aggregate(conn, days):
         if not cluster["ready"]:
             continue
+        shown = cluster.get("display") or cluster["signature"]
         rows = [
             {
                 "ts": cluster["last"],
                 "comm": cluster["component"],
-                "sig": cluster["signature"][:120],
+                "sig": shown[:120],
                 "message": (
-                    f"{cluster['signature']} (seen in {cluster['boots']} silent stop(s) "
+                    f"{shown} (seen in {cluster['boots']} silent stop(s) "
                     f"before shutdown, {cluster['occurrences']} occurrence(s))"
                 ),
             }
@@ -260,6 +286,7 @@ def ticket_candidates(conn, days: int = 30) -> list[dict]:
                 "key": cluster["key"],
                 "vendor": cluster["vendor"],
                 "signature": cluster["signature"],
+                "display": shown,
                 "kind": "correlation",
                 "rows": rows,
                 "count": cluster["occurrences"],

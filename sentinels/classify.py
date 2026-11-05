@@ -167,6 +167,9 @@ def vendor_for(*texts: str) -> str:
 
 
 SIGNATURE_MASKS = [
+    # Xorg logs the same input-lag warning with a different latency each time.
+    # Normalise the latency so it is one issue, not seven near-duplicates.
+    (re.compile(r"(?i)(\blagging behind by\s+)\d+\s*ms\b"), r"\1Nms"),
     (re.compile(r"0x[0-9a-fA-F]+"), "0xADDR"),
     (re.compile(r"\b\d{2,}\b"), "N"),
     (re.compile(r"\b[0-9a-fA-F]{8,}\b"), "HEX"),
@@ -175,7 +178,12 @@ SIGNATURE_MASKS = [
 
 
 def signature(text: str, limit: int = 160) -> str:
-    """Stable-ish signature for grouping recurring events."""
+    """Stable-ish signature for grouping recurring events.
+
+    Hex values are masked here only to keep keys and paths stable. Human-facing
+    titles, notifications and evidence use the raw message so error codes such
+    as ``0x08`` remain searchable.
+    """
     value = (text or "").strip().splitlines()[0] if text else ""
     for rx, repl in SIGNATURE_MASKS:
         value = rx.sub(repl, value)

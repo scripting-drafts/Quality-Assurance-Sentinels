@@ -340,10 +340,14 @@ def _correlation_report(conn, cluster: dict) -> str | None:
 
     config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = config.REPORT_DIR / f"correlation-{cluster['key']}.md"
+    shown = cluster.get("display") or cluster["signature"]
+    traced = trace.render(conn, cluster["signature"])
+    if shown != cluster["signature"]:
+        traced = [line.replace(cluster["signature"], shown) for line in traced]
     header = [
         f"# Correlated fault pattern — {cluster['vendor']}",
         "",
-        f"- Signature: `{cluster['signature']}`",
+        f"- Signature: `{shown}`",
         f"- Silent stops: **{cluster['boots']}** of {cluster['total_unclean']}",
         f"- Occurrences in death windows: **{cluster['occurrences']}** "
         f"({cluster['crashes']} crash(es))",
@@ -353,10 +357,7 @@ def _correlation_report(conn, cluster: dict) -> str | None:
         "---",
         "",
     ]
-    path.write_text(
-        "\n".join(header + trace.render(conn, cluster["signature"])),
-        encoding="utf-8",
-    )
+    path.write_text("\n".join(header + traced), encoding="utf-8")
     return str(path)
 
 
@@ -403,11 +404,18 @@ def collect(conn) -> dict:
         row = conn.execute(
             "SELECT * FROM notifications WHERE key=?", (key,)
         ).fetchone()
+        shown = cluster.get("display") or cluster["signature"]
         if row and row["path"] and os.path.exists(row["path"]):
-            continue
+            try:
+                with open(row["path"], encoding="utf-8", errors="replace") as fh:
+                    report_text = fh.read()
+            except OSError:
+                report_text = ""
+            if shown in report_text:
+                continue
         title = f"Consistent fault pattern: {cluster['vendor']}"
         body = (
-            f"{cluster['signature'][:120]}\n"
+            f"{shown[:120]}\n"
             f"{cluster['boots']} silent stop(s), {cluster['occurrences']} occurrence(s), "
             f"consistency {cluster['score']}/{cluster['threshold']}"
         )
@@ -417,12 +425,12 @@ def collect(conn) -> dict:
             # target. Do not create a second row for the same key.
             conn.execute(
                 "UPDATE notifications SET title=?, body=?, detail=?, path=? WHERE key=?",
-                (title, body[:1000], cluster["signature"][:2000], path, key),
+                (title, body[:1000], shown[:2000], path, key),
             )
         else:
             new += enqueue(
                 conn, "correlation", key, title, body,
-                detail=cluster["signature"], path=path,
+                detail=shown, path=path,
             )
     return {"queued": new, "pending": pending_count(conn)}
 

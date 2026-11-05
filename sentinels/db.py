@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS correlations (
     vendor TEXT NOT NULL,
     component TEXT,
     signature TEXT NOT NULL,
+    display TEXT,
     occurrences INTEGER NOT NULL DEFAULT 0,
     crashes INTEGER NOT NULL DEFAULT 0,
     window_start TEXT,
@@ -239,6 +240,9 @@ def init() -> None:
             conn.execute("ALTER TABLE events ADD COLUMN count INTEGER NOT NULL DEFAULT 1")
         if "last_ts" not in cols:
             conn.execute("ALTER TABLE events ADD COLUMN last_ts TEXT")
+        ccols = {r["name"] for r in conn.execute("PRAGMA table_info(correlations)")}
+        if ccols and "display" not in ccols:
+            conn.execute("ALTER TABLE correlations ADD COLUMN display TEXT")
         ncols = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
         for column, ddl in (
             ("path", "TEXT"),

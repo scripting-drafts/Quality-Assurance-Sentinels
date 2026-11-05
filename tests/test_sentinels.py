@@ -54,6 +54,35 @@ class SignatureTests(unittest.TestCase):
         b = classify.signature("crash at 0xcafebabe pid 7654 after 12 ms")
         self.assertEqual(a, b)
 
+    def test_event_latency_is_normalized(self):
+        a = classify.signature(
+            "(EE) event2 - Keyboard: client bug: event processing lagging behind by 23ms"
+        )
+        b = classify.signature(
+            "(EE) event2 - Keyboard: client bug: event processing lagging behind by 42ms"
+        )
+        self.assertEqual(a, b)
+
+    def test_display_text_keeps_error_codes(self):
+        from sentinels import tickets
+
+        shown = tickets._display_text(
+            {"message": "hidpp protocol error 0x08 on interface"}, "fallback"
+        )
+        self.assertIn("0x08", shown)
+        self.assertNotIn("0xADDR", shown)
+
+        issue = {
+            "key": "k1", "vendor": "canonical-kernel",
+            "signature": "hidpp protocol error 0xADDR",
+            "display": "hidpp protocol error 0x08",
+            "kind": "event", "count": 3, "first": "2026-11-05T00:00:00Z",
+            "last": "2026-11-05T00:00:00Z", "rows": [],
+        }
+        title, _ = tickets._draft(issue, None, {}, False)
+        self.assertIn("0x08", title)
+        self.assertNotIn("0xADDR", title)
+
     def test_vendor_routing(self):
         self.assertEqual(classify.vendor_for("mozilla::gfx::WebRender error"), "mozilla")
         self.assertEqual(classify.vendor_for("NVRM: Xid (PCI:0000:0a:00): 79"), "nvidia")
@@ -1329,6 +1358,28 @@ class CorrelationTests(unittest.TestCase):
         correlate.correlate(conn, days=30, notify=False)
         self.assertEqual(correlate.ticket_candidates(conn, days=30), [])
 
+    def test_correlation_keeps_raw_error_code_for_display(self):
+        from datetime import timedelta
+        from sentinels import correlate
+        from sentinels.util import parse_iso
+
+        conn = self._conn()
+        first, second = self._stops(conn)
+        for i, stop in enumerate((first, second)):
+            ts = (parse_iso(stop) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._event(
+                conn, f"boot{'AB'[i]}", ts,
+                "logitech-hidpp-device: received protocol error 0x08",
+                f"fp{i}", count=2,
+            )
+        correlate.correlate(conn, days=30, notify=False)
+        clusters = [c for c in correlate.aggregate(conn, days=30) if c["ready"]]
+        self.assertTrue(clusters)
+        self.assertIn("0x08", clusters[0]["display"])
+        self.assertIn("0xADDR", clusters[0]["signature"])
+        candidates = correlate.ticket_candidates(conn, days=30)
+        self.assertIn("0x08", candidates[0]["display"])
+
     def test_candidate_carries_inferred_attribution_note(self):
         from datetime import timedelta
         from sentinels import correlate
@@ -1370,6 +1421,18 @@ class RaiseGateTests(unittest.TestCase):
             "rows": [{"ts": iso(), "message": "NVRM: Xid 79", "boot_id": "bootA",
                       "severity": "critical"}],
         }
+
+    def test_draft_cap_prioritises_substantive_issues(self):
+        from sentinels import tickets
+
+        issues = [
+            {"key": "low", "kind": "event", "severity": "critical", "count": 1},
+            {"key": "high", "kind": "event", "severity": "error", "count": 42},
+            {"key": "corr", "kind": "correlation", "severity": "critical", "count": 3},
+        ]
+        selected = tickets.select_issues(issues, max_tickets=2)
+        self.assertEqual([i["key"] for i in selected], ["corr", "high"])
+        self.assertEqual(len(tickets.select_issues(issues, max_tickets=0)), 3)
 
     def test_stale_draft_is_not_viable(self):
         from sentinels import raise_ticket
@@ -1445,6 +1508,7 @@ class RaiseGateTests(unittest.TestCase):
             directory = pathlib.Path(result["staged"][0])
             self.assertTrue((directory / "ticket.md").exists())
             self.assertTrue((directory / "evidence" / "rows.json").exists())
+            self.assertFalse((directory / "evidence" / "logs.json").exists())
             self.assertTrue((directory / "evidence" / "trace.md").exists())
             self.assertTrue((directory / "evidence" / "manifest.json").exists())
             self.assertTrue((directory / "HOWTO.md").exists())
@@ -1459,6 +1523,36 @@ class RaiseGateTests(unittest.TestCase):
             digest = hashlib.sha256((directory / "ticket.md").read_bytes()).hexdigest()
             self.assertEqual(manifest["evidence_files"]["ticket.md"], digest)
             self.assertEqual(manifest["viability"]["score"], 6)
+
+    def test_legacy_logs_evidence_is_normalized(self):
+        import json
+        import pathlib
+        import tempfile
+        from sentinels import raise_ticket
+        from sentinels.util import sha256_text
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = pathlib.Path(tmp)
+            evidence = directory / "evidence"
+            evidence.mkdir()
+            (evidence / "logs.json").write_text('{"legacy": true}\n', encoding="utf-8")
+            (evidence / "manifest.json").write_text(json.dumps({
+                "evidence_files": {"evidence/logs.json": "old"},
+            }), encoding="utf-8")
+            (directory / "HOWTO.md").write_text(
+                "Check `evidence/logs.json`.\n", encoding="utf-8"
+            )
+            raise_ticket._normalize_evidence_names(directory)
+
+            self.assertFalse((evidence / "logs.json").exists())
+            self.assertTrue((evidence / "rows.json").exists())
+            manifest = json.loads((evidence / "manifest.json").read_text())
+            self.assertNotIn("evidence/logs.json", manifest["evidence_files"])
+            self.assertEqual(
+                manifest["evidence_files"]["evidence/rows.json"],
+                sha256_text('{"legacy": true}\n'),
+            )
+            self.assertIn("evidence/rows.json", (directory / "HOWTO.md").read_text())
 
     def test_event_and_correlation_for_one_signature_stage_once(self):
         import json
@@ -2091,6 +2185,28 @@ class NotificationTraceCrosscheckTests(unittest.TestCase):
         with mock.patch.object(crosscheck.report, "append_journal"):
             result = crosscheck.run(conn, days=30, notify_drift=False)
         self.assertTrue(result["unraised_issues"])
+
+    def test_crosscheck_does_not_count_capped_issues_as_drift(self):
+        from unittest import mock
+        from sentinels import crosscheck
+
+        conn = self._conn()
+        for i, (message, count) in enumerate((
+            ("NVRM: Xid (PCI:0000:01:00): 79", 5),
+            ("kworker: unusual critical warning", 1),
+        )):
+            conn.execute(
+                "INSERT INTO events(ts,boot_id,source,severity,unit,pid,comm,message,"
+                "fingerprint,raw,count,last_ts) VALUES(datetime('now'),'b','journal',"
+                "'critical','kernel',1,'k',?,'fp-cc-"+str(i)+"','{}',?,datetime('now'))",
+                (message, count),
+            )
+        with mock.patch.object(crosscheck.config, "MAX_TICKETS", 1), \
+             mock.patch.object(crosscheck.report, "append_journal"):
+            result = crosscheck.run(conn, days=30, notify_drift=False)
+        self.assertEqual(len(result["unraised_issues"]), 1)
+        self.assertEqual(len(result["capped_issues"]), 1)
+        self.assertEqual(result["drift"], 1)
 
     def test_log_line_gets_timestamp_and_severity_colour(self):
         from sentinels import logs

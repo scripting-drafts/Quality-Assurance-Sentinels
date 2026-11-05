@@ -11,7 +11,7 @@ This job compares three things and reports only differences:
 """
 from __future__ import annotations
 
-from . import boot, correlate, notify, report, tickets
+from . import boot, config, correlate, notify, report, tickets
 from .util import iso, sha256_text
 
 
@@ -32,11 +32,20 @@ def run(conn, days: int = 30, deep: bool = False, notify_drift: bool = True) -> 
     current = {issue["key"]: issue for issue in tickets.collect_issues(conn, days)}
     drafts = [dict(r) for r in conn.execute("SELECT * FROM ticket_drafts ORDER BY ts")]
     draft_keys = {d["issue_key"] for d in drafts}
+    selected = {
+        issue["key"] for issue in tickets.select_issues(
+            list(current.values()), config.MAX_TICKETS
+        )
+    }
 
     stale = [d for d in drafts if d["issue_key"] not in current]
+    capped = [
+        issue for key, issue in current.items()
+        if key not in selected and issue["vendor"] != "local"
+    ]
     missing = [
         issue for key, issue in current.items()
-        if key not in draft_keys and issue["vendor"] != "local"
+        if key not in draft_keys and key in selected and issue["vendor"] != "local"
     ]
     ready = [c for c in correlate.aggregate(conn, days) if c["ready"]]
     unready_drafts = [
@@ -52,11 +61,18 @@ def run(conn, days: int = 30, deep: bool = False, notify_drift: bool = True) -> 
             for d in stale
         ],
         "unraised_issues": [
-            {"key": i["key"], "vendor": i["vendor"], "signature": i["signature"][:120]}
+            {"key": i["key"], "vendor": i["vendor"],
+             "signature": (i.get("display") or i["signature"])[:120]}
             for i in missing
         ],
+        "capped_issues": [
+            {"key": i["key"], "vendor": i["vendor"],
+             "signature": (i.get("display") or i["signature"])[:120]}
+            for i in capped
+        ],
         "ready_without_draft": [
-            {"key": c["key"], "vendor": c["vendor"], "signature": c["signature"][:120]}
+            {"key": c["key"], "vendor": c["vendor"],
+             "signature": (c.get("display") or c["signature"])[:120]}
             for c in unready_drafts
         ],
         "deep": deep,
@@ -90,6 +106,7 @@ def run(conn, days: int = 30, deep: bool = False, notify_drift: bool = True) -> 
         "reproducible_issues": len(current),
         "stale_drafts": [d["issue_key"] for d in stale],
         "unraised_issues": [i["key"] for i in missing],
+        "capped_issues": [i["key"] for i in capped],
         "ready_without_draft": [c["key"] for c in unready_drafts],
         "drift": drift,
     }

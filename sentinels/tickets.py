@@ -112,6 +112,48 @@ def held_context(issue: dict) -> dict:
         return {}
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _display_text(row: dict, fallback: str) -> str:
+    """Human-readable text. Signatures stay masked only for grouping keys."""
+    if row.get("sig"):
+        name = row.get("comm") or (row.get("exe") or "").rsplit("/", 1)[-1]
+        text = f"{name} {row['sig']}".strip()
+    else:
+        text = (row.get("message") or "").strip().splitlines()
+        text = text[0] if text else ""
+    text = _ANSI.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return redact(text)[:200] or fallback
+
+
+def _draft_rank(issue: dict) -> tuple:
+    """Order drafts by what the raise gate is likely to accept.
+
+    A capped run must not spend its slots on one-off critical warnings while a
+    high-volume, substantive error waits outside the cap.
+    """
+    kind = issue.get("kind")
+    count = int(issue.get("count") or 0)
+    substantive = kind in ("correlation", "crash") or count >= config.RAISE_MIN_COUNT
+    return (
+        kind != "correlation",
+        kind != "crash",
+        not substantive,
+        issue.get("severity") != "critical",
+        -count,
+        issue.get("key") or "",
+    )
+
+
+def select_issues(issues: list[dict], max_tickets: int | None = None) -> list[dict]:
+    """Apply the draft cap after substantive issues have been prioritised."""
+    cap = config.MAX_TICKETS if max_tickets is None else max_tickets
+    ordered = sorted(issues, key=_draft_rank)
+    return ordered if cap <= 0 else ordered[:cap]
+
+
 def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dict]:
     since = (utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     crashes = [dict(r) for r in conn.execute(
@@ -135,6 +177,7 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
                 "key": key,
                 "vendor": vendor,
                 "signature": signature,
+                "display": _display_text(row, signature),
                 "kind": kind,
                 "rows": [],
                 "count": 0,
@@ -143,6 +186,8 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
                 "last": last,
             },
         )
+        if not issue.get("display"):
+            issue["display"] = _display_text(row, signature)
         issue["rows"].append(row)
         issue["count"] += n
         if first:
@@ -173,6 +218,7 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
             "key": key,
             "vendor": "hardware",
             "signature": "crashes correlated with physical core 2 affinity",
+            "display": "crashes correlated with physical core 2 affinity",
             "kind": "correlation",
             "rows": core2_crashes,
             "count": len(core2_crashes),
@@ -196,14 +242,7 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
         hold = held_context(issue)
         if hold:
             issue["held"] = hold
-    result.sort(
-        key=lambda i: (
-            i["kind"] != "correlation",
-            i["kind"] != "crash",
-            i["severity"] != "critical",
-            -i["count"],
-        )
-    )
+    result.sort(key=_draft_rank)
     return result
 
 
@@ -232,7 +271,8 @@ def _core2_table(rows: list[dict]) -> list[str]:
 
 def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> tuple[str, str]:
     meta = classify.VENDOR_META.get(issue["vendor"], classify.VENDOR_META["local"])
-    title = f"[QA] {meta['component']}: {issue['signature'][:120]}"
+    shown = issue.get("display") or issue["signature"]
+    title = f"[QA] {meta['component']}: {shown[:120]}"
     rows = issue["rows"]
     example = ""
     if rows:
@@ -350,8 +390,7 @@ _collect_issues = collect_issues
 
 def generate(conn, days: int = 7, include_local: bool = False, max_tickets: int | None = None) -> list[dict]:
     issues = collect_issues(conn, days, include_local)
-    cap = config.MAX_TICKETS if max_tickets is None else max_tickets
-    selected = issues if cap <= 0 else issues[:cap]
+    selected = select_issues(issues, max_tickets)
     bundle_row = conn.execute(
         "SELECT * FROM bundles ORDER BY id DESC LIMIT 1"
     ).fetchone()

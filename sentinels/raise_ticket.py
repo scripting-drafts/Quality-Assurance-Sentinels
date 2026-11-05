@@ -19,6 +19,10 @@ Layout (one directory per ticket, never a flat pile):
         evidence/rows.json   the exact observations behind it (redacted)
         evidence/trace.md    signature → events → stops → correlation → draft
         evidence/manifest.json  hashes, provenance, scores
+        evidence/*.jsonl     append-only audit records
+
+Naming convention: ``rows.json`` is the active evidence snapshot; ``*.jsonl``
+is append-only history. Legacy ``logs.json`` is migrated automatically.
 """
 from __future__ import annotations
 
@@ -42,6 +46,13 @@ ENVIRONMENTAL = re.compile(
 # When two clusters share a signature, a correlation carries the silent-stop
 # context; a crash has a stack; a plain event is the weakest form.
 KIND_RANK = {"correlation": 0, "crash": 1, "event": 2}
+
+# Ticket evidence naming convention:
+#   rows.json   snapshot of the observations behind the ticket
+#   *.jsonl     append-only audit records (history, standby, rejected, dedupe)
+#   *.md        human-readable reports and instructions
+EVIDENCE_ROWS = "rows.json"
+EVIDENCE_ROWS_LEGACY = "logs.json"
 
 
 # ---------------------------------------------------------------- assessment
@@ -156,6 +167,16 @@ def _dir_name(draft: dict, issue: dict | None) -> str:
     return f"{vendor}-{_slug(signature)}-{_identity(vendor, signature)}"
 
 
+def _display(issue: dict | None, draft: dict | None = None) -> str:
+    """Human-readable label; signatures stay masked for identity only."""
+    return util.redact(
+        (issue or {}).get("display")
+        or (issue or {}).get("signature")
+        or (draft or {}).get("title")
+        or "ticket"
+    )
+
+
 def _read_manifest(directory) -> dict:
     path = directory / "evidence" / "manifest.json"
     try:
@@ -201,6 +222,8 @@ def _already_staged(directory, issue: dict, bucket: str = "raise") -> bool:
     manifest = _read_manifest(directory)
     if manifest.get("issue_key") != issue.get("key"):
         return False
+    if manifest.get("display") != _display(issue):
+        return False
     if manifest.get("bucket") != bucket:
         return False
     if manifest.get("occurrences") != issue.get("count"):
@@ -208,7 +231,7 @@ def _already_staged(directory, issue: dict, bucket: str = "raise") -> bool:
     if manifest.get("last") != issue.get("last"):
         return False
     required = ("ticket.md", "HOWTO.md", "evidence/manifest.json",
-                "evidence/rows.json", "evidence/trace.md")
+                f"evidence/{EVIDENCE_ROWS}", "evidence/trace.md")
     return all((directory / rel).exists() for rel in required)
 
 
@@ -219,7 +242,7 @@ def _staged_summary(directory, issue: dict, verdict: dict,
         "directory": str(directory),
         "issue_key": issue["key"],
         "vendor": issue["vendor"],
-        "signature": issue["signature"][:120],
+        "signature": _display(issue)[:120],
         "bucket": bucket,
         "files": sorted((manifest.get("evidence_files") or {}).keys()),
         "manifest_sha256": (manifest.get("evidence_files") or {}).get(
@@ -252,12 +275,16 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
     hashes["ticket.md"] = _write(directory / "ticket.md", ticket_text)
 
     rows = _redact_rows(issue.get("rows") or [])
-    hashes["evidence/rows.json"] = _write(
-        directory / "evidence" / "rows.json",
+    hashes[f"evidence/{EVIDENCE_ROWS}"] = _write(
+        directory / "evidence" / EVIDENCE_ROWS,
         json.dumps(rows, indent=2, sort_keys=True, default=str) + "\n",
     )
 
-    trace_text = util.redact("\n".join(trace.render(conn, issue["signature"], limit=200)))
+    shown = _display(issue)
+    traced = trace.render(conn, issue["signature"], limit=200)
+    if shown != issue["signature"]:
+        traced = [line.replace(issue["signature"], shown) for line in traced]
+    trace_text = util.redact("\n".join(traced))
     hashes["evidence/trace.md"] = _write(directory / "evidence" / "trace.md", trace_text + "\n")
 
     stop_ids = sorted({
@@ -295,6 +322,7 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
         "issue_key": issue["key"],
         "vendor": issue["vendor"],
         "signature": util.redact(issue["signature"]),
+        "display": _display(issue),
         "kind": issue.get("kind"),
         "bucket": bucket,
         "occurrences": issue.get("count"),
@@ -322,7 +350,7 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
         "directory": str(directory),
         "issue_key": issue["key"],
         "vendor": issue["vendor"],
-        "signature": issue["signature"][:120],
+        "signature": _display(issue)[:120],
         "bucket": bucket,
         "files": sorted(hashes),
         "manifest_sha256": hashes["evidence/manifest.json"],
@@ -375,6 +403,68 @@ def _stamp() -> str:
     return utcnow().strftime("%Y%m%dT%H%M%SZ")
 
 
+def _normalize_evidence_names(directory) -> None:
+    """Apply the ticket evidence naming convention to one staged directory.
+
+    ``rows.json`` is the active snapshot. Legacy ``logs.json`` is renamed when
+    it is the only file, or preserved as ``prior-rows-*.json`` when a newer
+    snapshot already exists.
+    """
+    evidence = directory / "evidence"
+    legacy = evidence / EVIDENCE_ROWS_LEGACY
+    rows = evidence / EVIDENCE_ROWS
+    if not legacy.exists():
+        return
+    try:
+        if not rows.exists():
+            legacy.rename(rows)
+        else:
+            legacy.rename(evidence / f"prior-rows-{_stamp()}.json")
+    except OSError:
+        return
+
+    howto = directory / "HOWTO.md"
+    if howto.exists():
+        try:
+            text = howto.read_text(encoding="utf-8", errors="replace")
+            if "evidence/logs.json" in text:
+                _write(howto, text.replace("evidence/logs.json",
+                                            f"evidence/{EVIDENCE_ROWS}"))
+        except OSError:
+            pass
+
+    manifest_path = evidence / "manifest.json"
+    if not manifest_path.exists():
+        return
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    files = data.get("evidence_files")
+    if not isinstance(files, dict):
+        return
+    changed = False
+    for key in list(files):
+        if key.endswith(EVIDENCE_ROWS_LEGACY):
+            del files[key]
+            changed = True
+    if rows.exists():
+        try:
+            digest = sha256_text(rows.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            digest = ""
+        key = f"evidence/{EVIDENCE_ROWS}"
+        if digest and files.get(key) != digest:
+            files[key] = digest
+            changed = True
+    if changed:
+        data["evidence_files"] = files
+        _write(
+            manifest_path,
+            json.dumps(data, indent=2, sort_keys=True, default=str) + "\n",
+        )
+
+
 def _merge_into(source, destination, label: str) -> None:
     """Never delete a staged directory; park the older copy inside the newer."""
     target = destination / "evidence" / f"prior-{label}-{_stamp()}-{source.name}"
@@ -419,6 +509,7 @@ def _existing_by_identity() -> dict[str, list[dict]]:
         for path in sorted(root.iterdir()):
             if not path.is_dir():
                 continue
+            _normalize_evidence_names(path)
             manifest = _read_manifest(path)
             vendor = str(manifest.get("vendor") or "")
             signature = str(manifest.get("signature") or "")
@@ -547,7 +638,8 @@ def _write_bucket_index(root, record: str, title: str, empty: str) -> None:
         if manifest.exists():
             try:
                 data = json.loads(manifest.read_text(encoding="utf-8"))
-                vendor, signature = data.get("vendor", ""), data.get("signature", "")
+                vendor = data.get("vendor", "")
+                signature = data.get("display") or data.get("signature", "")
             except (OSError, json.JSONDecodeError):
                 pass
         entries.append({
@@ -652,6 +744,7 @@ def run(conn, days: int = 30, min_count: int | None = None,
             "verdict": verdict,
             "vendor": vendor,
             "signature": signature,
+            "display": _display(issue, draft),
             "rank": (
                 0 if verdict["viable"] else 1,
                 KIND_RANK.get((issue or {}).get("kind") or "", 3),
@@ -671,7 +764,7 @@ def run(conn, days: int = 30, min_count: int | None = None,
             "key": loser["draft"]["issue_key"],
             "kept": winner["draft"]["issue_key"],
             "vendor": winner["vendor"],
-            "signature": winner["signature"][:120],
+            "signature": winner["display"][:120],
             "kind": (loser["issue"] or {}).get("kind") or "",
         })
 

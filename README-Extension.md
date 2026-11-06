@@ -20,6 +20,7 @@ Useful examples:
 ./bin/qa report --kind daily --hours 24
 ./bin/qa crosscheck --deep
 ./bin/qa notify --test
+./bin/qa logs --all-layers -f
 ./bin/qa logs --install-autostart
 ./bin/qa logs --rotate
 ./bin/qa tickets --list

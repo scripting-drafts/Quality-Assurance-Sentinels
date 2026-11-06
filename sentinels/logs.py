@@ -13,13 +13,18 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
 from . import config
+from .util import run
+
+DEEP_UNIT = "qa-sentinel-deep.service"
 
 RESET = "\033[0m"
 COLORS = {
@@ -166,21 +171,92 @@ def _last_crosscheck(conn) -> str:
     return f"{row['ts']} (drift {row['drift']})"
 
 
-def follow(path, lines: int = 20, color: bool = True, poll: float = 0.5) -> None:
+def journal_tail(unit: str = DEEP_UNIT, lines: int = 20) -> list[str]:
+    """Recent layer-2 service lines from the journal."""
+    rc, out, err = run(
+        ["journalctl", "-u", unit, "-n", str(max(1, lines)),
+         "--no-pager", "-o", "short-iso"],
+        timeout=30,
+    )
+    if rc != 0:
+        return [f"[monitor] layer 2 journal unavailable: {err.strip()[:160]}"]
+    rows = [line for line in out.splitlines() if line.strip()]
+    return rows[-max(1, lines):] or [f"[monitor] no layer 2 entries for {unit}"]
+
+
+def _journal_pump(proc, emit, color: bool) -> None:
+    if proc.stdout is None:
+        return
+    try:
+        for line in proc.stdout:
+            emit(format_line(line, color))
+    except (OSError, ValueError):
+        return
+
+
+def all_layers(path, lines: int = 20, color: bool = True,
+               follow_mode: bool = False) -> None:
+    """Show the layer-1 file log and the layer-2 systemd journal together."""
+    def emit(line: str) -> None:
+        print(line, flush=True)
+
+    emit(format_line(f"[monitor] layer 2: {DEEP_UNIT}", color))
+    for line in journal_tail(DEEP_UNIT, lines):
+        emit(format_line(line, color))
+    emit(format_line(f"[monitor] layer 1: {path}", color))
+
+    if not follow_mode:
+        for line in tail_lines(path, lines):
+            emit(format_line(line, color))
+        return
+
+    try:
+        proc = subprocess.Popen(
+            ["journalctl", "-u", DEEP_UNIT, "-f", "-n", "0",
+             "--no-pager", "-o", "short-iso"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+    except OSError as exc:
+        emit(format_line(f"[monitor] cannot follow layer 2: {exc}", color))
+        follow(path, lines=lines, color=color, emit=emit)
+        return
+    lock = threading.Lock()
+
+    def locked_emit(line: str) -> None:
+        with lock:
+            emit(line)
+
+    thread = threading.Thread(
+        target=_journal_pump, args=(proc, locked_emit, color), daemon=True
+    )
+    thread.start()
+    try:
+        follow(path, lines=lines, color=color, emit=locked_emit)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def follow(path, lines: int = 20, color: bool = True, poll: float = 0.5,
+           emit=None) -> None:
     path = str(path)
+    out = emit or (lambda line: print(line, flush=True))
     for line in tail_lines(path, lines):
-        print(format_line(line, color), flush=True)
+        out(format_line(line, color))
     try:
         fh = open(path, "r", errors="replace")  # noqa: SIM115 - closed in finally
         fh.seek(0, os.SEEK_END)
     except OSError as exc:
-        print(format_line(f"[monitor] cannot open {path}: {exc}", color), flush=True)
+        out(format_line(f"[monitor] cannot open {path}: {exc}", color))
         return
     try:
         while True:
             chunk = fh.readline()
             if chunk:
-                print(format_line(chunk, color), flush=True)
+                out(format_line(chunk, color))
                 continue
             time.sleep(poll)
             try:
@@ -190,7 +266,8 @@ def follow(path, lines: int = 20, color: bool = True, poll: float = 0.5) -> None
             except OSError:
                 pass
     except KeyboardInterrupt:
-        print("\n[monitor] stopped", flush=True)
+        out("")
+        out(format_line("[monitor] stopped", color))
     finally:
         try:
             fh.close()

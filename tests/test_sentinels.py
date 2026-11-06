@@ -238,7 +238,7 @@ class PostureTests(unittest.TestCase):
         self.assertEqual(data["euid"], __import__("os").geteuid())
         self.assertIn(data["verdict"], ("unprivileged", "privileged"))
         self.assertFalse(data["sudo_nopasswd"])
-        self.assertTrue(str(data["perf_event_paranoid"]).isdigit())
+        self.assertIsInstance(int(data["perf_event_paranoid"]), int)
         self.assertIn("lockdown_active", data)
         self.assertIsInstance(data["baseline_changed"], list)
 
@@ -724,6 +724,43 @@ class LogRotationTests(unittest.TestCase):
             path.write_bytes(b"x" * 99)
             self.assertEqual(logs.rotate(path=path, max_bytes=100, keep=2), {})
             self.assertEqual(path.read_bytes(), b"x" * 99)
+
+
+class LayerLogViewTests(unittest.TestCase):
+    """The combined log view must show both layers without inventing entries."""
+
+    def test_journal_tail_honours_the_line_limit(self):
+        from unittest import mock
+        from sentinels import logs
+
+        with mock.patch.object(
+            logs, "run",
+            return_value=(0, "2026-11-06T10:00:00Z one\n2026-11-06T10:00:01Z two\n", ""),
+        ):
+            self.assertEqual(logs.journal_tail("unit", 1), ["2026-11-06T10:00:01Z two"])
+
+    def test_all_layers_prints_both_sources(self):
+        import contextlib
+        import io
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import logs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "cron.log"
+            path.write_text("layer one line\n", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(
+                logs, "journal_tail",
+                return_value=["2026-11-06T10:00:00Z layer two line"],
+            ), contextlib.redirect_stdout(output):
+                logs.all_layers(path, lines=5, color=False)
+        text = output.getvalue()
+        self.assertIn("layer 1", text)
+        self.assertIn("layer one line", text)
+        self.assertIn("layer 2", text)
+        self.assertIn("layer two line", text)
 
 
 class NotificationFlowTests(unittest.TestCase):

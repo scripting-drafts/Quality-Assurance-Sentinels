@@ -422,7 +422,10 @@ def cmd_logs(args) -> int:
     with db.session() as conn:
         for line in logs.header(conn):
             print(line, flush=True)
-    if args.follow:
+    if args.all_layers:
+        logs.all_layers(path, lines=args.lines, color=color,
+                        follow_mode=args.follow)
+    elif args.follow:
         logs.follow(path, lines=args.lines, color=color)
     else:
         for line in logs.tail_lines(path, args.lines):
@@ -1095,6 +1098,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("logs", help="live coloured sentinel log with timestamps")
     s.add_argument("-f", "--follow", action="store_true")
     s.add_argument("--lines", type=int, default=20)
+    s.add_argument("--all-layers", action="store_true",
+                   help="include layer 2 from the qa-sentinel-deep journal")
     s.add_argument("--no-color", action="store_true")
     s.add_argument("--force-color", action="store_true")
     s.add_argument("--install-autostart", action="store_true",

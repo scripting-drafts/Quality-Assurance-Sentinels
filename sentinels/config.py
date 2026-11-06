@@ -67,6 +67,11 @@ TEMP_ALERT_C = float(os.environ.get("QA_TEMP_ALERT_C", "90"))
 IO_PRESSURE_ALERT = float(os.environ.get("QA_IO_PRESSURE_ALERT", "50"))
 CORE2_CPUS = tuple(int(x) for x in os.environ.get("QA_CORE2_CPUS", "2,8").split(",") if x)
 
+# security provenance: live process scan every cycle, file ownership less often.
+SECURITY_FILE_SCAN_S = int(os.environ.get("QA_SECURITY_FILE_SCAN_S", "300"))
+SECURITY_AUDIT = os.environ.get("QA_SECURITY_AUDIT", "1").lower() in ("1", "yes", "true", "on")
+SECURITY_POLICY_PATH = CONFIG_DIR / "security-policy.json"
+
 # capture breadth. Defaults are production-sane; the "no artificial cap" mode is
 # opt-in because full-priority ingest and forever retention can fill a disk.
 FULL_CAPTURE = os.environ.get("QA_FULL_CAPTURE", "0").lower() in ("1", "yes", "true", "on")
@@ -141,3 +146,5 @@ def ensure_dirs() -> None:
         _secure(chain, 0o600)
     if IDENTITY_FILE.exists():
         _secure(IDENTITY_FILE, 0o600)
+    if SECURITY_POLICY_PATH.exists():
+        _secure(SECURITY_POLICY_PATH, 0o600)

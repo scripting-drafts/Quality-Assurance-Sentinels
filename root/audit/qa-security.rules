@@ -1,0 +1,12 @@
+## Quality Assurance Sentinels - security provenance audit rules.
+## Install with: sudo ./root/audit/install-audit-rules.sh
+## These rules are intentionally event-based so short-lived commands cannot
+## hide between the one-minute /proc provenance samples.
+
+# Every execve, including commands that exit before the next sample.
+-a always,exit -F arch=b64 -S execve -F key=qa_security_exec
+-a always,exit -F arch=b32 -S execve -F key=qa_security_exec
+
+# Privilege transitions and capability changes.
+-a always,exit -F arch=b64 -S setuid,setgid,setresuid,setresgid,setreuid,setregid,capset -F key=qa_security_priv
+-a always,exit -F arch=b32 -S setuid,setgid,setresuid,setresgid,setreuid,setregid,capset -F key=qa_security_priv

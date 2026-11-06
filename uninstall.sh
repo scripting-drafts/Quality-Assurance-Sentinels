@@ -103,8 +103,8 @@ if [[ $PURGE_DATA -eq 1 ]]; then
 else
   for dir in "${DATA_DIRS[@]}"; do
     [[ -d "$dir" ]] || continue
-    size="$(du -sh "$dir" 2>/dev/null | cut -f1)"
-    echo "  $dir/ ($size)"
+    size="$(du -sh "$dir" 2>/dev/null | cut -f1 || true)"
+    echo "  $dir/ (${size:-unreadable})"
   done
   [[ -f config/identity.env ]] && echo "  config/identity.env"
 fi

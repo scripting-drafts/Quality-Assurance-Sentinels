@@ -14,7 +14,7 @@ from datetime import datetime
 
 from . import (
     boot, config, correlate, crosscheck, db, deep, detect, evidence, holds, ingest, inventory,
-    logs, notify, posture, raise_ticket, report, sampler, tickets, trace, triage,
+    logs, notify, posture, raise_ticket, report, sampler, security, tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
 
@@ -175,6 +175,31 @@ def cmd_findings(args) -> int:
             print(f"      {row['detail'][:140]}")
         if not rows:
             print("no findings")
+    return 0
+
+
+def cmd_security(args) -> int:
+    with db.session() as conn:
+        if args.action == "policy":
+            print(json.dumps(security.load_policy(), indent=2, sort_keys=True))
+            return 0
+        if args.action == "audit-rules":
+            print(config.ROOT / "root/audit/qa-security.rules")
+            return 0
+        result = security.scan(
+            conn,
+            include_files=not args.no_files,
+            include_audit=not args.no_audit,
+        )
+        print(
+            json.dumps(
+                {key: value for key, value in result.items() if key != "findings"},
+                indent=2,
+            )
+        )
+        for finding in result["findings"][: args.limit]:
+            print(f"[{finding['severity']}] {finding['rule']} {finding['subject']}")
+            print(f"  {finding['detail'][:200]}")
     return 0
 
 
@@ -883,6 +908,39 @@ def cmd_cycle(args) -> int:
                 result["triage_error"] = str(exc)[:300]
                 db.record_run(conn, "cycle/triage", False, str(exc))
 
+        # Security provenance: live process/root-owned-file/audit checks.
+        try:
+            sec = security.scan(
+                conn,
+                include_files=security.files_due(conn),
+                include_audit=config.SECURITY_AUDIT,
+            )
+            result["security"] = {
+                "new": sec["new"],
+                "by_severity": sec["by_severity"],
+                "rules": sec["rules"][:20],
+                "processes": sec["processes"],
+                "files": sec["files"],
+                "audit": sec["audit"],
+            }
+            if sec["new"]:
+                from . import report as report_mod
+
+                report_mod.append_journal(
+                    conn,
+                    f"Security findings: {sec['new']} new",
+                    "\n".join(
+                        f"- **{finding['severity']}** `{finding['rule']}` "
+                        f"{finding['subject']}: {finding['detail'][:180]}"
+                        for finding in sec["findings"][:20]
+                    ) + "\n",
+                    "security",
+                )
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            result["security_error"] = str(exc)[:300]
+            db.record_run(conn, "cycle/security", False, str(exc))
+
         # Layer 1 detection: turn new raw evidence into explicit findings and,
         # when severe, queue layer-2 deep tracing and seal a layer-1 bundle.
         try:
@@ -1133,6 +1191,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--id", type=int)
     s.add_argument("--set-status", choices=("open", "investigating", "resolved", "dismissed"))
     s.set_defaults(func=cmd_findings)
+
+    s = sub.add_parser(
+        "security",
+        help="detect unauthorized user/root code execution and unexpected root permissions",
+    )
+    s.add_argument(
+        "action", nargs="?", choices=("scan", "policy", "audit-rules"), default="scan"
+    )
+    s.add_argument("--no-files", action="store_true", help="skip root-owned file scan")
+    s.add_argument("--no-audit", action="store_true", help="skip auditd records")
+    s.add_argument("--limit", type=int, default=50)
+    s.set_defaults(func=cmd_security)
 
     s = sub.add_parser("deep", help="layer 2: root-level tracefs/perf investigation")
     s.add_argument("--consume", action="store_true", help="process queued requests (systemd path unit)")

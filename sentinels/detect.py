@@ -48,10 +48,12 @@ def _upsert(conn, finding: dict) -> dict | None:
         "SELECT * FROM findings WHERE fingerprint=?", (finding["fingerprint"],)
     ).fetchone()
     if existing:
+        status = "open" if existing["status"] == "resolved" else existing["status"]
         conn.execute(
-            "UPDATE findings SET last_ts=?, count=count+1, detail=?, case_id=COALESCE(?, case_id)"
-            " WHERE id=?",
-            (finding["last_ts"], finding["detail"], finding.get("case_id"), existing["id"]),
+            "UPDATE findings SET last_ts=?, count=count+1, detail=?, case_id=COALESCE(?, case_id),"
+            " status=? WHERE id=?",
+            (finding["last_ts"], finding["detail"], finding.get("case_id"),
+             status, existing["id"]),
         )
         return None
     cur = conn.execute(
@@ -65,6 +67,11 @@ def _upsert(conn, finding: dict) -> dict | None:
     created = dict(finding)
     created["id"] = cur.lastrowid
     return created
+
+
+def upsert(conn, finding: dict) -> dict | None:
+    """Public wrapper used by security and other layer-1 rule sets."""
+    return _upsert(conn, finding)
 
 
 def _crash_findings(conn, since: str) -> list[dict]:

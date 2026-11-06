@@ -4,6 +4,7 @@ journal/
 evidence/
 tickets/
 triage/
+reports/
 config/identity.env
 !config/identity.env.example
 

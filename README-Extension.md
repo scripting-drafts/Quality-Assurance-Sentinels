@@ -9,6 +9,7 @@ All commands use `./bin/qa <command>` from the repository root.
 | Setup and operations | `install.sh`, `uninstall.sh`, `init`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, inspect prerequisites, check scheduling and security posture |
 | Routine collection | `cycle` (`tick`, `layer1`; `phase1` legacy), `sample`, `ingest`, `inventory`, `report` | Capture system state and run every due layer-1 duty |
 | Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, events, their relationships, and held/outdated packages |
+| Security provenance | `security` | Detect unexpected user/root code execution, root-owned state, and audit coverage gaps |
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |
 | Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports |
 | Deep diagnostics | `deploy-layer2` (`deploy-phase2` legacy), `deep` | Configure and run queued tracing |
@@ -78,6 +79,7 @@ Optional reporter details may be put in `config/identity.env`, using `config/ide
 - [`src/`](src/) — C sampler and Makefile.
 - [`root/`](root/) — optional elevated system collection, systemd integration, and deep tracing.
 - [`config/`](config/) — configuration notes and optional identity template.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — security provenance rules, auditd coverage, and limits.
 - [`tests/`](tests/) — project tests.
 
 To run the included Python test suite, from the repository root:

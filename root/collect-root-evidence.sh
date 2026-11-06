@@ -2,6 +2,7 @@
 # Optional root-only evidence pass. Run manually with sudo. Read-only probes;
 # it changes no sysctl, kernel lockdown, module or permission state.
 set -euo pipefail
+umask 077
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "run with: sudo $0" >&2

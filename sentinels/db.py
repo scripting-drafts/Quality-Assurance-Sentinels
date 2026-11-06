@@ -1,6 +1,7 @@
 """SQLite store. WAL mode so the sampler, ingester and reports never block."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 
@@ -253,6 +254,10 @@ def init() -> None:
             if ncols and column not in ncols:
                 conn.execute(f"ALTER TABLE notifications ADD COLUMN {column} {ddl}")
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version','1')")
+        try:
+            os.chmod(config.DB_PATH, 0o600)
+        except OSError:
+            pass
 
 
 @contextmanager

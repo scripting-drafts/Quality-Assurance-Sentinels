@@ -11,10 +11,12 @@
 #
 # Default OUTPUT_DIR: $ROOT/evidence/<ts>-wake
 set -uo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/evidence/$(date +%Y%m%d-%H%M%S)-wake}"
 mkdir -p "$OUT" || { echo "cannot create $OUT" >&2; exit 1; }
+chmod 700 "$OUT"
 
 SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"

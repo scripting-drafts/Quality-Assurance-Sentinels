@@ -22,7 +22,7 @@ import sys
 from datetime import timedelta
 
 from . import config
-from .util import iso, parse_iso, sha256_text, utcnow
+from .util import iso, parse_iso, sha256_text, utcnow, write_text_atomic
 
 APP = config.PROJECT_NAME
 
@@ -331,7 +331,7 @@ def _drafts_index(conn) -> str | None:
         lines.append(
             f"| {row['vendor']} | {row['title'][:110]} | [{name}]({name}) |"
         )
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text_atomic(path, "\n".join(lines) + "\n")
     return str(path)
 
 
@@ -358,7 +358,7 @@ def _correlation_report(conn, cluster: dict) -> str | None:
         "---",
         "",
     ]
-    path.write_text("\n".join(header + traced), encoding="utf-8")
+    write_text_atomic(path, "\n".join(header + traced))
     return str(path)
 
 

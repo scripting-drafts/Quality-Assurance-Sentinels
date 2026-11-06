@@ -7,6 +7,7 @@ import os
 import re
 import socket
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -150,12 +151,38 @@ def human_bytes(kib: float) -> str:
     return f"{value:.1f} TiB"
 
 
+def write_text_atomic(path, text: str, mode: int = 0o600) -> None:
+    """Write a file through a same-directory temporary inode and rename it.
+
+    This avoids leaving a truncated report or ticket after an interrupted
+    write, and does not follow a pre-existing symlink at the target path.
+    """
+    target = os.fspath(path)
+    parent = os.path.dirname(target) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(target)}.", dir=parent, text=True
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_json(path, payload) -> None:
-    tmp = str(path) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, sort_keys=True, default=str)
-        fh.write("\n")
-    os.replace(tmp, path)
+    write_text_atomic(
+        path,
+        json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
+    )
 
 
 def append_jsonl(path, payload) -> None:

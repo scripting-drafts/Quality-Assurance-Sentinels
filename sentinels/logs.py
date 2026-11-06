@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -112,6 +113,10 @@ def rotate(path=None, max_bytes: int | None = None, keep: int | None = None) -> 
 
     backup = target.with_name(f"{target.name}.1")
     shutil.copyfile(target, backup)
+    try:
+        backup.chmod(0o600)
+    except OSError:
+        pass
     with target.open("w", encoding="utf-8"):
         pass
     return {"path": str(target), "backup": str(backup), "bytes": size, "keep": copies}
@@ -202,7 +207,7 @@ def install_autostart() -> dict:
     wrapper = config.BIN / "qa-logs-terminal"
     wrapper.write_text(
         "#!/usr/bin/env bash\n"
-        f'cd "{config.ROOT}" || exit 1\n'
+        f"cd {shlex.quote(str(config.ROOT))} || exit 1\n"
         "exec ./bin/qa logs --follow\n",
         encoding="utf-8",
     )
@@ -215,7 +220,7 @@ def install_autostart() -> dict:
             "Type=Application\n"
             f"Name={config.PROJECT_NAME} live log\n"
             "Comment=Live coloured sentinel log with timestamps\n"
-            f"Exec={wrapper}\n"
+            f'Exec="{wrapper}"\n'
             "Terminal=true\n"
             "X-GNOME-Autostart-enabled=true\n"
             "Hidden=false\n"

@@ -7,7 +7,10 @@ import tarfile
 from datetime import datetime, timedelta, timezone
 
 from . import config, db, detect, posture, report, triage
-from .util import read_text, run, sha256_file, sha256_text, iso, utcnow, write_json, redact
+from .util import (
+    read_text, run, sha256_file, sha256_text, iso, utcnow, write_json,
+    write_text_atomic, redact,
+)
 
 
 def _rows(conn, sql: str, args=()) -> list[dict]:
@@ -46,7 +49,11 @@ def make_bundle(conn, reason: str = "manual", hours: int = 24, make_tar: bool = 
     stamp = now.strftime("%Y%m%d-%H%M%S")
     slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in reason)[:40]
     path = config.EVIDENCE_DIR / f"{stamp}-{slug}"
-    path.mkdir(parents=True, exist_ok=True)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
 
     latest_report = conn.execute(
         "SELECT path FROM reports ORDER BY id DESC LIMIT 1"
@@ -60,7 +67,7 @@ def make_bundle(conn, reason: str = "manual", hours: int = 24, make_tar: bool = 
         if isinstance(content, (dict, list)):
             write_json(target, content)
         else:
-            target.write_text(str(content), encoding="utf-8")
+            write_text_atomic(target, str(content))
         files[name] = sha256_file(target)
 
     crashes = _rows(conn, "SELECT * FROM crashes WHERE ts>=? ORDER BY ts DESC", (since,))
@@ -178,14 +185,23 @@ def make_bundle(conn, reason: str = "manual", hours: int = 24, make_tar: bool = 
     manifest["bundle_sha256"] = bundle_sha
     write_json(path / "manifest.json", manifest)
 
-    with open(config.EVIDENCE_DIR / "chain.log", "a", encoding="utf-8") as fh:
+    chain = config.EVIDENCE_DIR / "chain.log"
+    with open(chain, "a", encoding="utf-8") as fh:
         fh.write(f"{iso(now)} {bundle_sha} prev={prev_sha} bundle={path.name}\n")
+    try:
+        os.chmod(chain, 0o600)
+    except OSError:
+        pass
 
     tar_path = None
     if make_tar:
         tar_path = path.with_suffix(".tar.gz")
         with tarfile.open(tar_path, "w:gz") as tar:
             tar.add(path, arcname=path.name)
+        try:
+            os.chmod(tar_path, 0o600)
+        except OSError:
+            pass
 
     conn.execute(
         "INSERT INTO bundles(ts, path, sha256, prev_sha256, contents) VALUES(?,?,?,?,?)",
@@ -215,14 +231,38 @@ def verify_bundle(path: str) -> dict:
     manifest_path = base / "manifest.json"
     if not manifest_path.exists():
         return {"ok": False, "error": f"manifest missing in {base}"}
-    manifest = json.loads(manifest_path.read_text())
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"invalid manifest: {exc}", "path": str(base)}
+    if not isinstance(manifest, dict):
+        return {"ok": False, "error": "manifest must be an object", "path": str(base)}
     problems = []
-    for name, expected in manifest.get("files", {}).items():
+    root = base.resolve()
+    files = manifest.get("files", {})
+    if not isinstance(files, dict):
+        return {"ok": False, "error": "manifest files must be an object", "path": str(base)}
+    for name, expected in files.items():
+        if not isinstance(name, str) or not name or os.path.isabs(name):
+            problems.append(f"unsafe path: {name}")
+            continue
         target = base / name
-        if not target.exists():
+        try:
+            resolved = target.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            problems.append(f"unsafe path: {name}")
+            continue
+        if not target.is_file():
             problems.append(f"missing: {name}")
-        elif sha256_file(target) != expected:
-            problems.append(f"hash mismatch: {name}")
+        else:
+            try:
+                actual = sha256_file(target)
+            except OSError:
+                problems.append(f"unreadable: {name}")
+                continue
+            if actual != expected:
+                problems.append(f"hash mismatch: {name}")
     body = dict(manifest)
     files_sha = body.get("files_sha256")
     claimed = body.get("bundle_sha256")

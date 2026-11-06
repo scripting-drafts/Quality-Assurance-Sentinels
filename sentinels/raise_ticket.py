@@ -209,14 +209,14 @@ def _redact_rows(rows: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------- staging
 def _write(path, text: str) -> str:
     """Write only on change. Re-running triage must not churn evidence files."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.exists():
         try:
             if path.read_text(encoding="utf-8", errors="replace") == text:
                 return sha256_text(text)
         except OSError:
             pass
-    path.write_text(text, encoding="utf-8")
+    util.write_text_atomic(path, text)
     return sha256_text(text)
 
 
@@ -270,7 +270,12 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
     """
     directory = (root or config.RAISE_DIR) / (name or _dir_name(draft, issue))
     # never rm/rewrite: a staged ticket is a record, not a cache entry
-    (directory / "evidence").mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        pass
+    (directory / "evidence").mkdir(parents=True, exist_ok=True, mode=0o700)
 
     hashes: dict[str, str] = {}
 
@@ -495,13 +500,13 @@ def _normalize_evidence_names(directory) -> None:
 def _merge_into(source, destination, label: str) -> None:
     """Never delete a staged directory; park the older copy inside the newer."""
     target = destination / "evidence" / f"prior-{label}-{_stamp()}-{source.name}"
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     shutil.move(str(source), str(target))
 
 
 def _record_event(directory, record: str, event: str, reason: str) -> None:
     path = directory / "evidence" / record
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     util.append_jsonl(path, {"ts": iso(), "event": event, "reason": reason})
 
 

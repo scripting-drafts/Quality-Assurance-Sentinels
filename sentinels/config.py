@@ -109,10 +109,34 @@ NOTIFY_BACKOFF_S = max(60, int(os.environ.get("QA_NOTIFY_BACKOFF_S", "300")))
 NOTIFY_BACKOFF_MAX_S = max(60, int(os.environ.get("QA_NOTIFY_BACKOFF_MAX_S", str(6 * 3600))))
 
 
+def _secure(path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
 def ensure_dirs() -> None:
     for d in (
         VAR, JOURNAL_DIR, REPORT_DIR, EVIDENCE_DIR, TICKET_DIR, DRAFT_DIR,
-        TRIAGE_DIR, DEEP_DIR, DEEP_REQUEST_DIR, DEEP_ARCHIVE_DIR, CONFIG_DIR,
+        TRIAGE_DIR.parent, TRIAGE_DIR, DEEP_DIR, DEEP_REQUEST_DIR, DEEP_ARCHIVE_DIR, CONFIG_DIR,
         RAISE_DIR, STANDBY_DIR, REJECT_DIR, PSTORE_EXPORT_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
+        _secure(d, 0o700)
+    # Existing state from older installs may still be group/world-readable.
+    for name in (
+        "cron.log", "qa.db", "sentinels.db", "sentinels.db-wal",
+        "sentinels.db-shm", "cycle.lock", "posture.json",
+        "posture-baseline.json", "sudo-probe.json",
+    ):
+        path = VAR / name
+        if path.exists():
+            _secure(path, 0o600)
+    for path in PSTORE_EXPORT_DIR.glob("*/summary.txt"):
+        _secure(path, 0o600)
+    chain = EVIDENCE_DIR / "chain.log"
+    if chain.exists():
+        _secure(chain, 0o600)
+    if IDENTITY_FILE.exists():
+        _secure(IDENTITY_FILE, 0o600)

@@ -555,8 +555,72 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(ok, detail)
 
 
+class SecurityHardeningTests(unittest.TestCase):
+    """Fail closed on unsafe paths and keep local evidence private."""
+
+    def test_bundle_verifier_rejects_path_traversal(self):
+        import pathlib
+        import tempfile
+        from sentinels import evidence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (root / "outside").write_text("secret\n", encoding="utf-8")
+            (bundle / "manifest.json").write_text(json.dumps({
+                "files": {"../outside": "irrelevant"},
+            }), encoding="utf-8")
+            result = evidence.verify_bundle(str(bundle))
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("unsafe path" in p for p in result["problems"]))
+
+    def test_bundle_verifier_rejects_symlink_escape(self):
+        import pathlib
+        import tempfile
+        from sentinels import evidence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            outside = root / "outside"
+            outside.write_text("secret\n", encoding="utf-8")
+            (bundle / "link").symlink_to(outside)
+            (bundle / "manifest.json").write_text(json.dumps({
+                "files": {"link": "irrelevant"},
+            }), encoding="utf-8")
+            result = evidence.verify_bundle(str(bundle))
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("unsafe path" in p for p in result["problems"]))
+
+    def test_atomic_json_write_is_private(self):
+        import pathlib
+        import tempfile
+        from sentinels import util
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "state.json"
+            util.write_json(path, {"a": 1})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(path.read_text()), {"a": 1})
+            self.assertFalse(list(path.parent.glob(".state.json.*")))
+
+    def test_cron_block_quotes_root_and_sets_private_umask(self):
+        import pathlib
+        from unittest import mock
+        from sentinels import cli
+
+        with mock.patch.object(cli.config, "ROOT", pathlib.Path("/tmp/qa sentinels")):
+            block = cli._cron_block()
+        self.assertIn("cd '/tmp/qa sentinels'", block)
+        self.assertEqual(block.count("umask 077"), 2)
+
+
 class CycleTests(unittest.TestCase):
-    """Layer 1 runs every due duty from one scheduled command."""
+    """Layer 1 runs every duty from one scheduled command."""
 
     def _conn(self):
         import sqlite3
@@ -1511,6 +1575,8 @@ class RaiseGateTests(unittest.TestCase):
             self.assertEqual(result["viable"], 1, result)
             directory = pathlib.Path(result["staged"][0])
             self.assertTrue((directory / "ticket.md").exists())
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((directory / "ticket.md").stat().st_mode & 0o777, 0o600)
             self.assertTrue((directory / "evidence" / "logs.json").exists())
             self.assertFalse((directory / "evidence" / "rows.json").exists())
             self.assertTrue((directory / "evidence" / "trace.md").exists())

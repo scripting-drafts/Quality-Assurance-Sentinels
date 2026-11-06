@@ -6,7 +6,10 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from . import boot, config, db, deep, detect, posture, triage
-from .util import fmt_duration, human_bytes, iso, parse_iso, read_text, redact
+from .util import (
+    fmt_duration, human_bytes, iso, parse_iso, read_text, redact,
+    write_text_atomic,
+)
 
 SEV_ORDER = {"critical": 0, "error": 1, "warning": 2, "info": 3}
 
@@ -491,10 +494,10 @@ def append_journal(conn, title: str, body: str, kind: str) -> None:
     path = config.JOURNAL_DIR / f"{day}.md"
     stamp = iso()
     if not path.exists():
-        path.write_text(
-            f"# QA sentinel journal — {day}\n\n"
+        write_text_atomic(
+            path,
+            f"# {config.PROJECT_NAME} journal — {day}\n\n"
             "Append-only record. Newest entry at the bottom. Times are UTC.\n",
-            encoding="utf-8",
         )
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(f"\n---\n\n## {stamp} · {kind} · {title}\n\n{body}\n")
@@ -506,7 +509,7 @@ def write_report(conn, kind: str = "daily", hours: int = 24) -> dict:
     config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     path = config.REPORT_DIR / f"{kind}-{stamp}.md"
-    path.write_text(body, encoding="utf-8")
+    write_text_atomic(path, body)
     append_journal(conn, title, body, kind)
     summary = next(
         (ln for ln in body.splitlines() if ln.startswith("- Events:")), title

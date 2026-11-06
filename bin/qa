@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Thin, dependency-free entry point. Keeps cron's PATH deterministic.
 set -euo pipefail
+umask 077
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"

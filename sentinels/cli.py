@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -22,12 +23,16 @@ CRON_END = "# <<< qa-sentinels <<<"
 
 
 def _cron_block() -> str:
-    root = config.ROOT
+    root = shlex.quote(str(config.ROOT))
+    command = (
+        f"cd {root} && umask 077 && "
+        "flock -n var/cycle.lock ./bin/qa cycle >>var/cron.log 2>&1"
+    )
     return "\n".join(
         [
             CRON_BEGIN,
-            f"* * * * * cd {root} && flock -n var/cycle.lock ./bin/qa cycle >>var/cron.log 2>&1",
-            f"@reboot sleep 30 && cd {root} && flock -n var/cycle.lock ./bin/qa cycle >>var/cron.log 2>&1",
+            f"* * * * * {command}",
+            f"@reboot sleep 30 && {command}",
             CRON_END,
         ]
     )

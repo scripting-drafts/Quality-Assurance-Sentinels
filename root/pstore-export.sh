@@ -14,6 +14,7 @@
 # marked archive:root-only is upgraded to archive:panic.
 
 set -euo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${QA_PSTORE_ARCHIVE_DIR:-/var/lib/systemd/pstore}"
@@ -43,7 +44,7 @@ PATTERN='Kernel panic|Oops:|BUG: unable|general protection fault|stack-protector
 
 mkdir -p "$DST"
 chown "$OWNER" "$DST"
-chmod 0755 "$DST"
+chmod 0700 "$DST"
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
@@ -67,8 +68,8 @@ for dir in "$SRC"/*; do
 
     mkdir -p "$DST/$name"
     chown "$OWNER" "$DST/$name"
-    chmod 0755 "$DST/$name"
-    install -m 0644 -o "${OWNER%%:*}" -g "${OWNER#*:}" "$tmp" "$DST/$name/summary.txt"
+    chmod 0700 "$DST/$name"
+    install -m 0600 -o "${OWNER%%:*}" -g "${OWNER#*:}" "$tmp" "$DST/$name/summary.txt"
 done
 
 if [ "$REFRESH" -eq 1 ] && [ -x "$ROOT/bin/qa" ]; then

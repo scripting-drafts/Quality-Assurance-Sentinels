@@ -18,7 +18,7 @@ Two options:
 Layer 1 never has tracing capabilities. Layer 2 starts only when a JSON request
 appears in `triage/core2/deep-requests/`, then archives it after the run. Manual run:
 
-    sudo ~/qa-sentinels/bin/qa deep --case 1 --duration 30 --perf-record
+    sudo ~/Quality-Assurance-Sentinels/bin/qa deep --case 1 --duration 30 --perf-record
 
 Run `sudo root/collect-root-evidence.sh` when a bundle needs that depth. Output
 goes to `var/root-evidence/<utc>/` with mode 0700 and is **not** auto-bundled.

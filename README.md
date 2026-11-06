@@ -47,8 +47,8 @@ Layer 1 is optional and covers the routine monitor; layer 2 adds deep tracing. T
 Run these commands **from the directory containing the cloned repository**:
 
 ```bash
-git clone https://github.com/scripting-drafts/qa-sentinels.git
-cd qa-sentinels
+git clone https://github.com/scripting-drafts/Quality-Assurance-Sentinels.git
+cd Quality-Assurance-Sentinels
 
 # Compile the local sampler into bin/qa_sample.
 make -C src install
@@ -67,7 +67,7 @@ make -C src install
 ./bin/qa install-cron
 ```
 
-`cycle` performs one routine pass, running every due layer-1 duty: daily report, notification drain, correlation refresh and crosscheck. The schedule invokes only `cycle`; `tick` and `layer1` remain aliases (`phase1` is legacy). The data and reports remain on the local machine. The repository directory, CLI name (`qa`) and systemd unit prefixes remain `qa-sentinels`/`qa` for compatibility.
+`cycle` performs one routine pass, running every due layer-1 duty: daily report, notification drain, correlation refresh and crosscheck. The schedule invokes only `cycle`; `tick` and `layer1` remain aliases (`phase1` is legacy). The data and reports remain on the local machine. The CLI name (`qa`), environment variable and systemd unit prefixes remain `qa-sentinels`/`qa` for compatibility.
 
 > **Single installer:** `./install.sh` is interactive and adds either layer: layer 1 (sampler, first cycle, scheduling) and/or layer 2 (deep trace + eBPF). Preview with `./install.sh --dry-run`; unattended installs use `./install.sh --layer1 --layer2 --yes`. Use `--no-layer1` for layer 2 only, and `--systemd` to schedule with a system timer instead of cron.
 

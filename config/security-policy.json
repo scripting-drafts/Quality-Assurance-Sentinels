@@ -81,7 +81,8 @@
   "allow_root_user_path": [],
   "allowed_root_owned_paths": [
     "src/qa_sample",
-    "bin/qa_sample"
+    "bin/qa_sample",
+    "var/hardware-storage-root.json"
   ],
   "audit_log": "/var/log/audit/audit.log",
   "audit_keys": [

@@ -72,6 +72,38 @@ SECURITY_FILE_SCAN_S = int(os.environ.get("QA_SECURITY_FILE_SCAN_S", "300"))
 SECURITY_AUDIT = os.environ.get("QA_SECURITY_AUDIT", "1").lower() in ("1", "yes", "true", "on")
 SECURITY_POLICY_PATH = CONFIG_DIR / "security-policy.json"
 
+# hardware-health tier: slow sampling, external tools are best-effort and
+# privilege failures are recorded rather than failing the routine cycle.
+HARDWARE_ENABLE = os.environ.get("QA_HARDWARE_ENABLE", "1").lower() in ("1", "yes", "true", "on")
+HARDWARE_INTERVAL_S = max(60, int(os.environ.get("QA_HARDWARE_INTERVAL_S", "900")))
+HARDWARE_TIMEOUT_S = max(5, int(os.environ.get("QA_HARDWARE_TIMEOUT_S", "20")))
+HARDWARE_RAW_LIMIT = max(4096, int(os.environ.get("QA_HARDWARE_RAW_LIMIT", "200000")))
+HARDWARE_CE_ALERT = int(os.environ.get("QA_HARDWARE_CE_ALERT", "1"))
+HARDWARE_AER_CE_ALERT = int(os.environ.get("QA_HARDWARE_AER_CE_ALERT", "1"))
+HARDWARE_NVME_USED_ALERT = int(os.environ.get("QA_HARDWARE_NVME_USED_ALERT", "1"))
+HARDWARE_NVME_SPARE_ALERT = int(os.environ.get("QA_HARDWARE_NVME_SPARE_ALERT", "100"))
+HARDWARE_GPU_TEMP_ALERT_C = int(os.environ.get("QA_HARDWARE_GPU_TEMP_ALERT_C", "65"))
+HARDWARE_SENSOR_TEMP_ALERT_C = int(os.environ.get("QA_HARDWARE_SENSOR_TEMP_ALERT_C", "70"))
+HARDWARE_STORAGE_TEMP_ALERT_C = int(os.environ.get("QA_HARDWARE_STORAGE_TEMP_ALERT_C", "50"))
+HARDWARE_SOURCES_PATH = CONFIG_DIR / "hardware-sources.json"
+HARDWARE_VENDOR_LINES = max(10, int(os.environ.get("QA_HARDWARE_VENDOR_LINES", "200")))
+HARDWARE_RETENTION_DAYS = max(1, int(os.environ.get("QA_HARDWARE_RETENTION_DAYS", "14")))
+HARDWARE_STORAGE_HANDOFF = VAR / "hardware-storage-root.json"
+HARDWARE_STORAGE_HANDOFF_MAX_AGE_S = max(300, int(os.environ.get("QA_HARDWARE_STORAGE_HANDOFF_MAX_AGE_S", "1800")))
+HARDWARE_REQUIRED_SOURCES = tuple(
+    item.strip() for item in os.environ.get(
+        "QA_HARDWARE_REQUIRED_SOURCES",
+        "ras,storage,gpu,bmc,sensors,turbostat,pcm,uncore,vendor",
+    ).split(",") if item.strip()
+)
+
+# Linux Security Modules: state/drift and denial monitoring.
+LSM_ENABLE = os.environ.get("QA_LSM_ENABLE", "1").lower() in ("1", "yes", "true", "on")
+LSM_INTERVAL_S = max(60, int(os.environ.get("QA_LSM_INTERVAL_S", "300")))
+LSM_DENIAL_ALERT = max(1, int(os.environ.get("QA_LSM_DENIAL_ALERT", "1")))
+LSM_TIMEOUT_S = max(5, int(os.environ.get("QA_LSM_TIMEOUT_S", "20")))
+LSM_RETENTION_DAYS = max(1, int(os.environ.get("QA_LSM_RETENTION_DAYS", "30")))
+
 # capture breadth. Defaults are production-sane; the "no artificial cap" mode is
 # opt-in because full-priority ingest and forever retention can fill a disk.
 FULL_CAPTURE = os.environ.get("QA_FULL_CAPTURE", "0").lower() in ("1", "yes", "true", "on")
@@ -148,3 +180,5 @@ def ensure_dirs() -> None:
         _secure(IDENTITY_FILE, 0o600)
     if SECURITY_POLICY_PATH.exists():
         _secure(SECURITY_POLICY_PATH, 0o600)
+    if HARDWARE_SOURCES_PATH.exists():
+        _secure(HARDWARE_SOURCES_PATH, 0o600)

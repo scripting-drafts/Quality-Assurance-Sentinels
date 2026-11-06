@@ -93,6 +93,13 @@ class AuditRuleTests(unittest.TestCase):
         self.assertEqual(finding["rule"], "security.audit_root_exec")
         self.assertEqual(finding["severity"], "critical")
 
+    def test_non_syscall_audit_record_is_ignored(self):
+        line = (
+            'type=EXECVE msg=audit(1793979000.1:44): argc=2 '
+            'a0="sudo" a1="true" key="qa_security_priv"'
+        )
+        self.assertIsNone(security.parse_audit_line(line, security.load_policy()))
+
     def test_privilege_change_event(self):
         line = (
             'type=SYSCALL msg=audit(1793979000.1:43): uid=1000 euid=0 auid=1000 '
@@ -118,9 +125,11 @@ class FileRuleTests(unittest.TestCase):
 
 class AuditCoverageTests(unittest.TestCase):
     def test_missing_audit_source_is_reported_as_unavailable(self):
+        from unittest.mock import patch
         policy = security.load_policy("/nonexistent/security-policy.json")
         policy["audit_log"] = "/nonexistent/audit.log"
-        findings, available = security.audit_scan(policy)
+        with patch("sentinels.security.shutil.which", return_value=None):
+            findings, available = security.audit_scan(policy)
         self.assertFalse(available)
         self.assertEqual(findings[0]["rule"], "security.audit_unavailable")
 

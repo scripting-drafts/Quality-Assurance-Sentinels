@@ -1,0 +1,20 @@
+{
+  "vendor_logs": [],
+  "required_sources": [
+    "ras",
+    "storage",
+    "gpu",
+    "bmc",
+    "sensors",
+    "turbostat",
+    "pcm",
+    "uncore",
+    "vendor"
+  ],
+  "not_applicable": {},
+  "redfish": {
+    "enabled": false,
+    "base_url": "",
+    "token_env": "QA_REDFISH_TOKEN"
+  }
+}

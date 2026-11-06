@@ -6,7 +6,7 @@ import os
 import tarfile
 from datetime import datetime, timedelta, timezone
 
-from . import config, db, detect, posture, report, triage
+from . import config, db, detect, hardware, lsm, posture, report, triage
 from .util import (
     read_text, run, sha256_file, sha256_text, iso, utcnow, write_json,
     write_text_atomic, redact,
@@ -125,6 +125,19 @@ def make_bundle(conn, reason: str = "manual", hours: int = 24, make_tar: bool = 
     put("samples-summary.json", _compact_samples(conn, since))
     put("inventory.json", inventory)
     put("inventory-diff.json", diffs)
+    hardware_data = hardware.latest(conn, complete=True)
+    if hardware_data:
+        hardware_data["run"]["detail"] = redact(hardware_data["run"].get("detail") or "")
+        for item in hardware_data.get("items", []):
+            item["value"] = redact(str(item.get("value") or ""))
+    put("hardware.json", hardware_data)
+    lsm_data = lsm.latest(conn)
+    if lsm_data:
+        lsm_data["state"] = json.loads(json.dumps(lsm_data.get("state") or {}))
+        for key, values in (lsm_data.get("denials") or {}).items():
+            if isinstance(values, list):
+                lsm_data["denials"][key] = [redact(str(value)) for value in values]
+    put("lsm.json", lsm_data)
     put("core2-analysis.md", report._core2_section(conn, since))
     tri_cases = triage.cases(conn, limit=10000)
     for case_row in tri_cases:

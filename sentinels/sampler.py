@@ -116,3 +116,12 @@ def prune(conn) -> None:
     )
     conn.execute("DELETE FROM inventory_diffs WHERE ts < datetime('now', ?)", (cutoff,))
     conn.execute("DELETE FROM inventory_runs WHERE ts < datetime('now', ?)", (cutoff,))
+    hw_cutoff = f"-{config.HARDWARE_RETENTION_DAYS} days"
+    conn.execute(
+        "DELETE FROM hardware_items WHERE run_id IN "
+        "(SELECT id FROM hardware_runs WHERE ts < datetime('now', ?))",
+        (hw_cutoff,),
+    )
+    conn.execute("DELETE FROM hardware_runs WHERE ts < datetime('now', ?)", (hw_cutoff,))
+    lsm_cutoff = f"-{config.LSM_RETENTION_DAYS} days"
+    conn.execute("DELETE FROM lsm_runs WHERE ts < datetime('now', ?)", (lsm_cutoff,))

@@ -143,6 +143,31 @@ CREATE TABLE IF NOT EXISTS inventory_diffs (
     old_value TEXT,
     new_value TEXT
 );
+CREATE TABLE IF NOT EXISTS hardware_runs (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    status TEXT,
+    sources TEXT,
+    duration_ms INTEGER,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hardware_ts ON hardware_runs(ts);
+CREATE TABLE IF NOT EXISTS hardware_items (
+    run_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    item TEXT NOT NULL,
+    value TEXT,
+    PRIMARY KEY (run_id, source, item)
+);
+CREATE TABLE IF NOT EXISTS lsm_runs (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    digest TEXT,
+    state TEXT,
+    denials TEXT,
+    status TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_lsm_ts ON lsm_runs(ts);
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,

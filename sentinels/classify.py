@@ -62,6 +62,8 @@ BENIGN_FOR_TICKET = [
 
 
 def ticketworthy(signature: str, kind: str, severity: str, count: int) -> bool:
+    if kind == "finding":
+        return True
     if kind in ("crash", "correlation"):
         return True
     if any(re.search(p, signature, re.IGNORECASE) for p in BENIGN_FOR_TICKET):
@@ -169,6 +171,20 @@ def vendor_for(*texts: str) -> str:
     for name, pattern in VENDOR_RULES:
         if pattern.search(blob):
             return name
+    return "local"
+
+
+def vendor_for_finding(rule: str, subject: str = "", detail: str = "") -> str:
+    """Route a sentinel finding to the owner expected to act on it."""
+    text = " ".join((rule or "", subject or "", detail or ""))
+    if rule.startswith("lsm."):
+        if rule in ("lsm.state_unreadable", "lsm.state_changed", "lsm.lockdown.none"):
+            return "local"
+        return "canonical-kernel"
+    if rule.startswith("hardware.gpu"):
+        return "nvidia"
+    if rule.startswith("hardware."):
+        return "hardware"
     return "local"
 
 

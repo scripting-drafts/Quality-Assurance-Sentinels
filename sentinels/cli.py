@@ -13,8 +13,8 @@ import time
 from datetime import datetime
 
 from . import (
-    boot, config, correlate, crosscheck, db, deep, detect, evidence, holds, ingest, inventory,
-    logs, notify, posture, raise_ticket, report, sampler, security, tickets, trace, triage,
+    boot, config, correlate, crosscheck, db, deep, detect, evidence, hardware, holds, ingest,
+    inventory, logs, lsm, notify, posture, raise_ticket, report, sampler, security, tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
 
@@ -120,6 +120,8 @@ def cmd_report(args) -> int:
         if args.kind == "daily":
             db.meta_set(conn, "last_daily_report_date", datetime.now().astimezone().strftime("%Y-%m-%d"))
         print(result["path"])
+        made = tickets.generate(conn, days=7)
+        print(f"tickets: {len(made)} drafts")
     return 0
 
 
@@ -176,6 +178,59 @@ def cmd_findings(args) -> int:
         if not rows:
             print("no findings")
     return 0
+
+
+def cmd_lsm(args) -> int:
+    with db.session() as conn:
+        if args.action == "baseline":
+            print(lsm.baseline(conn))
+            return 0
+        if args.action == "show":
+            print(json.dumps(lsm.latest(conn), indent=2, default=str))
+            return 0
+        if args.action == "check":
+            state = lsm.collect_state()
+            print(json.dumps(state, indent=2, sort_keys=True))
+            return 0
+        result = lsm.scan(conn)
+        print(json.dumps({
+            "run_id": result["run_id"],
+            "digest": result["digest"],
+            "active": result["state"].get("active"),
+            "status": "partial" if result["state"].get("errors") else "ok",
+            "new": result["new"],
+            "by_severity": result["by_severity"],
+            "denials": result["denials"].get("counts", {}),
+        }, indent=2))
+        for finding in result["findings"][: args.limit]:
+            print(f"[{finding['severity']}] {finding['rule']} {finding['subject']}")
+            print(f"  {finding['detail'][:200]}")
+        return 0
+
+
+def cmd_hardware(args) -> int:
+    with db.session() as conn:
+        if args.action in ("discover", "discover-vendor"):
+            print(json.dumps(hardware.discover_vendor(), indent=2, sort_keys=True))
+            return 0
+        if args.action == "check":
+            data = hardware.check()
+            print(json.dumps(data, indent=2, sort_keys=True))
+            return 1 if (data.get("missing_required_tools") or data.get("missing_sources")) else 0
+        if args.action == "show":
+            data = hardware.latest(conn)
+            if data.get("run"):
+                data["run"].pop("detail", None)
+            print(json.dumps(data, indent=2, default=str))
+            return 0
+        sources = {item.strip() for item in (args.sources or "").split(",") if item.strip()}
+        result = hardware.collect(conn, sources=sources or None)
+        print(json.dumps({key: value for key, value in result.items() if key != "findings"},
+                         indent=2))
+        for finding in result["findings"][: args.limit]:
+            print(f"[{finding['severity']}] {finding['rule']} {finding['subject']}")
+            print(f"  {finding['detail'][:200]}")
+        return 1 if result.get("failed") else 0
 
 
 def cmd_security(args) -> int:
@@ -476,6 +531,8 @@ def cmd_status(args) -> int:
         crashes = scalar("SELECT COUNT(*) FROM crashes")
         core2 = scalar("SELECT COUNT(*) FROM crashes WHERE core2_involved=1")
         inv = conn.execute("SELECT * FROM inventory_runs ORDER BY id DESC LIMIT 1").fetchone()
+        hw = conn.execute("SELECT * FROM hardware_runs ORDER BY id DESC LIMIT 1").fetchone()
+        lsm_row = conn.execute("SELECT * FROM lsm_runs ORDER BY id DESC LIMIT 1").fetchone()
         bundles = scalar("SELECT COUNT(*) FROM bundles")
         drafts = scalar("SELECT COUNT(*) FROM ticket_drafts")
         chain_head = ""
@@ -488,6 +545,16 @@ def cmd_status(args) -> int:
         print(f"  last sample   : {db.meta_get(conn, 'last_sample_ts') or 'never'}")
         print(f"  last ingest   : {db.meta_get(conn, 'last_journal_ingest') or 'never'}")
         print(f"  last inventory: {db.meta_get(conn, 'last_inventory_ts') or 'never'}")
+        print(f"  last hardware : {db.meta_get(conn, 'last_hardware_ts') or 'never'}")
+        print(f"  last lsm      : {db.meta_get(conn, 'last_lsm_ts') or 'never'}")
+        if lsm_row:
+            print(f"  lsm           : digest={str(lsm_row['digest'] or '')[:12]} "
+                  f"status={lsm_row['status']}")
+        if hw:
+            print(f"  hardware tier : run {hw['id']} {hw['status']} "
+                  f"({hw['duration_ms']} ms) sources={hw['sources']}")
+        else:
+            print("  hardware tier : no runs yet (qa hardware collect)")
         print(f"  database      : {samples} samples, {events} events, {crashes} crashes")
         print(f"  critical      : {critical} events; core-2-correlated crashes: {core2}")
         if inv:
@@ -788,6 +855,7 @@ def _cycle_mark(conn, key: str) -> None:
 def cmd_cycle(args) -> int:
     config.ensure_dirs()
     result: dict = {"ts": iso()}
+    findings_dirty = False
     failed = 0
     try:
         rotated = logs.rotate()
@@ -908,6 +976,76 @@ def cmd_cycle(args) -> int:
                 result["triage_error"] = str(exc)[:300]
                 db.record_run(conn, "cycle/triage", False, str(exc))
 
+        # Linux Security Modules: state drift and denial monitoring.
+        if config.LSM_ENABLE and lsm.is_due(conn):
+            try:
+                lr = lsm.scan(conn)
+                result["lsm"] = {
+                    "run_id": lr["run_id"],
+                    "digest": lr["digest"],
+                    "active": lr["state"].get("active"),
+                    "new": lr["new"],
+                    "by_severity": lr["by_severity"],
+                    "denials": lr["denials"].get("counts", {}),
+                }
+                if lr["state"].get("errors"):
+                    failed += 1
+                    result["lsm_state_errors"] = lr["state"]["errors"]
+                if lr["new"]:
+                    findings_dirty = True
+                    from . import report as report_mod
+
+                    report_mod.append_journal(
+                        conn,
+                        f"LSM findings: {lr['new']} new",
+                        "\n".join(
+                            f"- **{finding['severity']}** `{finding['rule']}` "
+                            f"{finding['subject']}: {finding['detail'][:180]}"
+                            for finding in lr["findings"][:20]
+                        ) + "\n",
+                        "lsm",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["lsm_error"] = str(exc)[:300]
+                db.record_run(conn, "cycle/lsm", False, str(exc))
+
+        # Hardware-health tier: slow, best-effort, privilege-aware.
+        if config.HARDWARE_ENABLE and hardware.is_due(conn):
+            try:
+                hw = hardware.collect(conn)
+                result["hardware"] = {
+                    "run_id": hw["run_id"],
+                    "status": hw["status"],
+                    "failed": hw["failed"],
+                    "failed_sources": hw["failed_sources"],
+                    "sources": hw["sources"],
+                    "items": hw["items"],
+                    "new": hw["new"],
+                    "by_severity": hw["by_severity"],
+                }
+                if hw["failed"]:
+                    failed += 1
+                    result["hardware_failed_sources"] = hw["failed_sources"]
+                if hw["new"]:
+                    findings_dirty = True
+                    from . import report as report_mod
+
+                    report_mod.append_journal(
+                        conn,
+                        f"Hardware findings: {hw['new']} new",
+                        "\n".join(
+                            f"- **{finding['severity']}** `{finding['rule']}` "
+                            f"{finding['subject']}: {finding['detail'][:180]}"
+                            for finding in hw["findings"][:20]
+                        ) + "\n",
+                        "hardware",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["hardware_error"] = str(exc)[:300]
+                db.record_run(conn, "cycle/hardware", False, str(exc))
+
         # Security provenance: live process/root-owned-file/audit checks.
         try:
             sec = security.scan(
@@ -924,6 +1062,7 @@ def cmd_cycle(args) -> int:
                 "audit": sec["audit"],
             }
             if sec["new"]:
+                findings_dirty = True
                 from . import report as report_mod
 
                 report_mod.append_journal(
@@ -946,6 +1085,7 @@ def cmd_cycle(args) -> int:
         try:
             new_findings = detect.scan(conn)
             if new_findings:
+                findings_dirty = True
                 counts: dict[str, int] = {}
                 for finding in new_findings:
                     counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
@@ -980,6 +1120,15 @@ def cmd_cycle(args) -> int:
             failed += 1
             result["layer1_error"] = str(exc)[:300]
             db.record_run(conn, "cycle/layer1", False, str(exc))
+
+        if findings_dirty:
+            try:
+                made = tickets.generate(conn, days=7)
+                result["finding_tickets"] = {"drafts": len(made)}
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                result["finding_ticket_error"] = str(exc)[:300]
+                db.record_run(conn, "cycle/finding-tickets", False, str(exc))
 
         # Layer 1 owns the whole routine loop: correlation refresh, the raise
         # gate, cross-check and notification delivery are due-based and
@@ -1191,6 +1340,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--id", type=int)
     s.add_argument("--set-status", choices=("open", "investigating", "resolved", "dismissed"))
     s.set_defaults(func=cmd_findings)
+
+    s = sub.add_parser(
+        "lsm",
+        help="monitor Linux Security Modules, drift and AppArmor/SELinux denials",
+    )
+    s.add_argument("action", nargs="?", choices=("scan", "show", "check", "baseline"), default="scan")
+    s.add_argument("--limit", type=int, default=50)
+    s.set_defaults(func=cmd_lsm)
+
+    s = sub.add_parser(
+        "hardware",
+        help="collect the hardware-health tier (RAS, storage, GPU, BMC, sensors, PMU, APEI)",
+    )
+    s.add_argument("action", nargs="?", choices=("collect", "show", "check", "discover", "discover-vendor"), default="collect")
+    s.add_argument("--sources", help="comma-separated source list: ras,storage,gpu,bmc,sensors,turbostat,pcm,uncore,vendor")
+    s.add_argument("--limit", type=int, default=50)
+    s.set_defaults(func=cmd_hardware)
 
     s = sub.add_parser(
         "security",

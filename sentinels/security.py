@@ -472,7 +472,14 @@ def parse_audit_line(line: str, policy: dict, default_ts: str | None = None) -> 
     key = (fields.get("key") or "").strip('"')
     if key not in set(policy.get("audit_keys") or []):
         return None
+    # ausearch emits SYSCALL plus EXECVE/PROCTITLE/CWD records.  Only the
+    # SYSCALL record carries uid/auid/euid; parsing the others creates bogus
+    # uid=-1 privilege findings.
+    if (fields.get("type") or "").upper() not in ("", "SYSCALL"):
+        return None
     uid = _int(fields.get("uid"), -1)
+    if uid < 0:
+        return None
     euid = _int(fields.get("euid"), uid)
     auid = _int(fields.get("auid"), -1)
     exe = (fields.get("exe") or "").strip('"')
@@ -593,6 +600,19 @@ def audit_findings(policy: dict) -> list[dict]:
     return audit_scan(policy)[0]
 
 
+PROCESS_RULES = (
+    "security.root_user_path",
+    "security.root_cmdline_user_path",
+    "security.root_writable_exe",
+    "security.root_from_user_parent",
+    "security.root_elevated_session",
+    "security.deleted_exe",
+    "security.unexpected_uid_user_path",
+    "security.user_code_tmp",
+    "security.nonroot_caps",
+)
+
+
 def _resolve_missing(conn, rule: str, active: set[str]) -> None:
     rows = conn.execute(
         "SELECT id,fingerprint FROM findings WHERE rule=? AND status='open'", (rule,)
@@ -613,6 +633,7 @@ def scan(
     policy = policy or load_policy()
     proc_findings, proc_count = scan_procs(proc_root, policy)
     candidates = list(proc_findings)
+    active_proc = {finding["fingerprint"] for finding in proc_findings}
     if include_files is None:
         include_files = files_due(conn)
     file_count = 0
@@ -635,6 +656,9 @@ def scan(
         created = detect.upsert(conn, finding)
         if created:
             new.append(created)
+    if proc_count:
+        for rule in PROCESS_RULES:
+            _resolve_missing(conn, rule, active_proc)
     if include_files:
         _resolve_missing(conn, "security.root_owned_user_state", active_files)
         db.meta_set(conn, "last_security_file_scan", iso())

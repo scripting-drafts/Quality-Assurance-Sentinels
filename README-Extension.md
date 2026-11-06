@@ -9,9 +9,11 @@ All commands use `./bin/qa <command>` from the repository root.
 | Setup and operations | `install.sh`, `uninstall.sh`, `init`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, inspect prerequisites, check scheduling and security posture |
 | Routine collection | `cycle` (`tick`, `layer1`; `phase1` legacy), `sample`, `ingest`, `inventory`, `report` | Capture system state and run every due layer-1 duty |
 | Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, events, their relationships, and held/outdated packages |
+| Hardware health | `hardware` | Collect RAS/EDAC/AER/APEI, SMART/NVMe, GPU, BMC, sensors, turbostat/PCM/uncore, vendor logs |
+| Linux Security Modules | `lsm` | Monitor AppArmor, SELinux, Smack, TOMOYO, Yama, lockdown, IMA, BPF, drift and denials |
 | Security provenance | `security` | Detect unexpected user/root code execution, root-owned state, and audit coverage gaps |
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |
-| Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports |
+| Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports; open hardware/LSM/security findings are drafted too |
 | Deep diagnostics | `deploy-layer2` (`deploy-phase2` legacy), `deep` | Configure and run queued tracing |
 | Monitoring display | `logs` | Read, rotate or follow timestamped activity |
 
@@ -80,6 +82,8 @@ Optional reporter details may be put in `config/identity.env`, using `config/ide
 - [`root/`](root/) — optional elevated system collection, systemd integration, and deep tracing.
 - [`config/`](config/) — configuration notes and optional identity template.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — security provenance rules, auditd coverage, and limits.
+- [`docs/HARDWARE.md`](docs/HARDWARE.md) — hardware-health sources, privileges, scheduling, and limits.
+- [`docs/LSM.md`](docs/LSM.md) — Linux Security Modules state, drift, denials, and limits.
 - [`tests/`](tests/) — project tests.
 
 To run the included Python test suite, from the repository root:

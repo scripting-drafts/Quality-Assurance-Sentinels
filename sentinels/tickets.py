@@ -151,7 +151,9 @@ def select_issues(issues: list[dict], max_tickets: int | None = None) -> list[di
     """Apply the draft cap after substantive issues have been prioritised."""
     cap = config.MAX_TICKETS if max_tickets is None else max_tickets
     ordered = sorted(issues, key=_draft_rank)
-    return ordered if cap <= 0 else ordered[:cap]
+    findings = [issue for issue in ordered if issue.get("kind") == "finding"]
+    others = [issue for issue in ordered if issue.get("kind") != "finding"]
+    return findings + (others if cap <= 0 else others[:cap])
 
 
 def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dict]:
@@ -162,6 +164,9 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
     events = [dict(r) for r in conn.execute(
         "SELECT * FROM events WHERE ts>=? AND severity IN ('critical','error') ORDER BY ts DESC",
         (since,),
+    )]
+    findings = [dict(r) for r in conn.execute(
+        "SELECT * FROM findings WHERE status IN ('open','investigating') ORDER BY ts DESC"
     )]
 
     issues: dict[str, dict] = {}
@@ -210,6 +215,20 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
         sig = classify.signature(e.get("message") or "")
         add(vendor, sig, "event", e)
 
+    for finding in findings:
+        vendor = classify.vendor_for_finding(
+            finding.get("rule") or "",
+            finding.get("subject") or "",
+            finding.get("detail") or "",
+        )
+        sig = f"{finding.get('rule')}: {finding.get('subject')}"
+        row = dict(finding)
+        row["kind"] = "finding"
+        row["message"] = (
+            f"{finding.get('rule')}: {finding.get('subject')}: {finding.get('detail')}"
+        )
+        add(vendor, sig, "finding", row)
+
     # dedicated hardware ticket: core-2 correlation must reach the platform vendor
     core2_crashes = [c for c in crashes if c.get("core2_involved") == 1]
     if core2_crashes:
@@ -230,7 +249,7 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
     result = [
         i
         for i in issues.values()
-        if (include_local or i["vendor"] != "local")
+        if (i["kind"] == "finding" or include_local or i["vendor"] != "local")
         and classify.ticketworthy(i["signature"], i["kind"], i["severity"], i["count"])
     ]
     # silent stops correlated with a recurring component signature: the one path
@@ -405,7 +424,16 @@ def generate(conn, days: int = 7, include_local: bool = False, max_tickets: int 
         vendor = issue["vendor"]
         slug = re.sub(r"[^a-z0-9]+", "-", issue["signature"].lower()).strip("-")[:60]
         path = config.DRAFT_DIR / f"{vendor}-{slug}-{issue['key'][:8]}.md"
-        path.write_text(body, encoding="utf-8")
+        try:
+            path.write_text(body, encoding="utf-8")
+        except PermissionError:
+            # A root cron may have left a 0600 root-owned draft at the canonical
+            # path.  Keep the evidence and write a fresh operator-owned draft.
+            path = config.DRAFT_DIR / (
+                f"{vendor}-{slug}-{issue['key'][:8]}-"
+                f"{utcnow().strftime('%H%M%S')}.md"
+            )
+            path.write_text(body, encoding="utf-8")
         keep.add(str(path))
         conn.execute(
             "INSERT INTO ticket_drafts(ts, vendor, path, title, issue_key)"
@@ -418,7 +446,12 @@ def generate(conn, days: int = 7, include_local: bool = False, max_tickets: int 
         if old.name == "INDEX.md":  # generated digest target, not a draft
             continue
         if str(old) not in keep:
-            old.unlink(missing_ok=True)
+            try:
+                old.unlink(missing_ok=True)
+            except PermissionError:
+                # Root-owned leftovers are reported by the security tier; do
+                # not let them stop the operator-owned draft set.
+                continue
     db.meta_set(conn, "last_ticket_run", iso())
     _triage_new_tickets(conn, selected)
     return made

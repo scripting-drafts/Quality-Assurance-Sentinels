@@ -6,6 +6,7 @@ tickets/
 triage/
 reports/
 config/identity.env
+config/hardware-sources.json
 !config/identity.env.example
 
 # Generated build artifacts (build per host)

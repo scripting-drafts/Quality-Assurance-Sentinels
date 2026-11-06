@@ -5,7 +5,7 @@ import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from . import boot, config, db, deep, detect, posture, triage
+from . import boot, config, db, deep, detect, hardware, lsm, posture, triage
 from .util import (
     fmt_duration, human_bytes, iso, parse_iso, read_text, redact,
     write_text_atomic,
@@ -152,6 +152,73 @@ def _sample_stats(conn, since_iso: str) -> dict:
         }
     )
     return stats
+
+
+
+def _hardware_section(conn) -> str:
+    data = hardware.latest(conn, complete=True)
+    if not data:
+        return "## Hardware tier\n\n_No hardware run yet._"
+    run = data["run"]
+    try:
+        sources = json.loads(run.get("sources") or "{}")
+    except ValueError:
+        sources = {}
+    lines = [
+        "## Hardware tier",
+        "",
+        f"- Last run: `{run.get('ts')}` status **{run.get('status')}** "
+        f"({run.get('duration_ms')} ms)",
+        "",
+        "| source | status |",
+        "|---|---|",
+    ]
+    for name, status in sorted(sources.items()):
+        lines.append(f"| {name} | {status} |")
+    notable = []
+    for item in data["items"]:
+        key = item["item"].lower()
+        if any(token in key for token in (
+            "ue_count", "ce_count", "smart_passed", "media_errors", "critical_warning",
+            "percentage_used", "available_spare", "ecc_uncorrected", "retired_pages",
+            "throttle_active", "temperature", "apei/table", "bmc/ipmi",
+        )):
+            notable.append(item)
+    if notable:
+        lines += ["", "| source | item | value |", "|---|---|---|"]
+        for item in notable[:40]:
+            value = redact(str(item["value"]))[:160].replace("|", "\\|")
+            lines.append(f"| {item['source']} | `{item['item']}` | {value} |")
+    return "\n".join(lines)
+
+
+
+def _lsm_section(conn) -> str:
+    data = lsm.latest(conn)
+    if not data:
+        return "## Linux Security Modules\n\n_No LSM run yet._"
+    state = data.get("state") or {}
+    denials = data.get("denials") or {}
+    apparmor = state.get("apparmor") or {}
+    profiles = apparmor.get("profiles") or {}
+    selinux = state.get("selinux") or {}
+    lines = [
+        "## Linux Security Modules",
+        "",
+        f"- Last run: `{data.get('ts')}` digest `{str(data.get('digest') or '')[:12]}`",
+        f"- Active: `{', '.join(state.get('active') or []) or 'none'}`",
+        f"- AppArmor: enabled={apparmor.get('enabled') or 'n/a'} "
+        f"profiles={profiles.get('total', 0)} "
+        f"(enforce={profiles.get('enforce', 0)}, complain={profiles.get('complain', 0)})",
+        f"- SELinux: present={selinux.get('present')} enforce={selinux.get('enforce') or 'n/a'}",
+        f"- Yama ptrace_scope: `{(state.get('yama') or {}).get('ptrace_scope') or 'n/a'}`; "
+        f"lockdown: `{(state.get('lockdown') or {}).get('selected') or 'n/a'}`",
+        f"- IMA policy: {'present' if (state.get('ima') or {}).get('present') else 'absent'}; "
+        f"BPF LSM: {state.get('bpf_lsm')}",
+        f"- Denials since `{denials.get('since') or 'n/a'}`: "
+        f"`{denials.get('counts') or {}}`",
+    ]
+    return "\n".join(lines)
 
 
 def _core2_section(conn, since_iso: str) -> str:
@@ -360,6 +427,8 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
         body.append("_No crashes recorded in this window._")
 
     body += ["", _core2_section(conn, since)]
+    body += ["", _hardware_section(conn)]
+    body += ["", _lsm_section(conn)]
 
     tri = triage.summary(conn)
     tri_rows = triage.cases(conn, limit=12)

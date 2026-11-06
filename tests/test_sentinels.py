@@ -87,6 +87,10 @@ class SignatureTests(unittest.TestCase):
         self.assertEqual(classify.vendor_for("mozilla::gfx::WebRender error"), "mozilla")
         self.assertEqual(classify.vendor_for("NVRM: Xid (PCI:0000:0a:00): 79"), "nvidia")
         self.assertEqual(classify.vendor_for("kernel: BUG: unable to handle page fault"), "canonical-kernel")
+        self.assertEqual(classify.vendor_for(
+            "Configuration file /run/systemd/system/netplan-ovs-cleanup.service is marked world-inaccessible"
+        ), "netplan")
+        self.assertEqual(classify.vendor_for("systemd[1]: Started Journal Service."), "systemd")
 
     def test_ticket_filter(self):
         self.assertFalse(classify.ticketworthy("not generating service for xdg-autostart", "event", "warning", 50))
@@ -1658,6 +1662,80 @@ class RaiseGateTests(unittest.TestCase):
             self.assertFalse((raised / "nvidia-event-old").exists())
             parked = list(corr_dir.rglob("OLD.txt"))
             self.assertEqual(len(parked), 1, parked)
+
+    def test_vendor_reclassification_keeps_one_ticket(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        signature = (
+            "Configuration file /run/systemd/system/netplan-ovs-cleanup.service "
+            "is marked world-inaccessible"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            standby = root / "standby"
+            for name, vendor, generated in (
+                ("systemd-old", "systemd", "2026-11-05T14:33:05Z"),
+                ("netplan-new", "netplan", "2026-11-06T07:19:55Z"),
+            ):
+                evidence = standby / name / "evidence"
+                evidence.mkdir(parents=True)
+                (evidence / "manifest.json").write_text(json.dumps({
+                    "vendor": vendor, "signature": signature, "kind": "event",
+                    "generated": generated,
+                }), encoding="utf-8")
+            with mock.patch.object(config, "RAISE_DIR", root / "raise"), \
+                 mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"):
+                grouped = raise_ticket._existing_by_identity()
+                winners, merged = raise_ticket._dedupe_existing(grouped)
+
+            self.assertEqual(len(winners), 1)
+            self.assertEqual(
+                next(iter(winners.values()))["path"].name, "netplan-new"
+            )
+            self.assertEqual(len(merged), 1)
+            self.assertFalse((standby / "systemd-old").exists())
+            self.assertTrue((standby / "netplan-new").exists())
+
+    def test_legacy_raised_duplicate_is_merged_into_active(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        signature = "Bluetooth: hci0: Invalid exception type N"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for base, name, generated in (
+                (root / "raise", "bluetooth-active", "2026-11-06T07:00:00Z"),
+                (root / "raised", "bluetooth-old", "2026-11-05T17:00:00Z"),
+            ):
+                evidence = base / name / "evidence"
+                evidence.mkdir(parents=True)
+                (evidence / "manifest.json").write_text(json.dumps({
+                    "vendor": "canonical-kernel", "signature": signature,
+                    "kind": "event", "generated": generated,
+                }), encoding="utf-8")
+            with mock.patch.object(config, "RAISE_DIR", root / "raise"), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"):
+                grouped = raise_ticket._existing_by_identity()
+                winners, merged = raise_ticket._dedupe_existing(grouped)
+
+            self.assertEqual(len(winners), 1)
+            self.assertEqual(
+                next(iter(winners.values()))["path"].name, "bluetooth-active"
+            )
+            self.assertEqual(merged[0]["bucket"], "legacy-raised")
+            self.assertFalse((root / "raised" / "bluetooth-old").exists())
+            self.assertTrue(list(
+                (root / "raise" / "bluetooth-active").rglob("manifest.json")
+            ))
 
     def test_unchanged_ticket_is_not_rewritten(self):
         import pathlib

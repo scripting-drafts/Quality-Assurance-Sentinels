@@ -23,6 +23,9 @@ Layout (one directory per ticket, never a flat pile):
 
 Naming convention: ``logs.json`` is the active evidence snapshot; ``*.jsonl``
 is append-only history. Legacy ``rows.json`` is migrated automatically.
+
+A ticket is keyed by signature, not by vendor or cluster kind, so vendor
+reclassification and event/correlation views update one directory.
 """
 from __future__ import annotations
 
@@ -158,13 +161,19 @@ def _ticket_identity(draft: dict, issue: dict | None) -> tuple[str, str]:
     return vendor, signature
 
 
-def _identity(vendor: str, signature: str) -> str:
-    return sha256_text(f"{vendor}\0{signature}")[:8]
+def _identity(signature: str) -> str:
+    """Stable ticket identity: the signature, independent of vendor routing.
+
+    Vendor classification changes over time (for example systemd -> netplan for
+    the same unit message). The fault is still one ticket, so vendor must not
+    split it into two directories.
+    """
+    return sha256_text(signature)[:8]
 
 
 def _dir_name(draft: dict, issue: dict | None) -> str:
     vendor, signature = _ticket_identity(draft, issue)
-    return f"{vendor}-{_slug(signature)}-{_identity(vendor, signature)}"
+    return f"{vendor}-{_slug(signature)}-{_identity(signature)}"
 
 
 def _display(issue: dict | None, draft: dict | None = None) -> str:
@@ -518,10 +527,22 @@ def _bucket_roots() -> dict:
     }
 
 
+def _legacy_bucket_roots() -> dict:
+    """Older/manual archives that still contain real ticket directories."""
+    base = config.RAISE_DIR.parent
+    return {
+        "legacy-raised": base / "raised",
+        "legacy-fixed": base / "fixed",
+        "legacy-solved": base / "solved",
+    }
+
+
 def _existing_by_identity() -> dict[str, list[dict]]:
-    """Every staged directory, grouped by its vendor/signature identity."""
+    """Every staged directory, grouped by its signature identity."""
     grouped: dict[str, list[dict]] = {}
-    for bucket, root in _bucket_roots().items():
+    roots = dict(_bucket_roots())
+    roots.update(_legacy_bucket_roots())
+    for bucket, root in roots.items():
         if not root.exists():
             continue
         for path in sorted(root.iterdir()):
@@ -533,8 +554,9 @@ def _existing_by_identity() -> dict[str, list[dict]]:
             signature = str(manifest.get("signature") or "")
             if not vendor or not signature:
                 continue
-            grouped.setdefault(_identity(vendor, signature), []).append({
+            grouped.setdefault(_identity(signature), []).append({
                 "bucket": bucket,
+                "legacy": bucket.startswith("legacy-"),
                 "path": path,
                 "manifest": manifest,
                 "kind": str(manifest.get("kind") or ""),
@@ -544,25 +566,25 @@ def _existing_by_identity() -> dict[str, list[dict]]:
 
 
 def _dedupe_existing(grouped: dict[str, list[dict]]) -> tuple[dict[str, dict], list[dict]]:
-    """Keep one directory per vendor/signature and park the older copies.
+    """Keep one directory per signature and park the older copies.
 
-    The duplicate may predate the identity-based naming or be an event and a
-    correlation view of the same signature. Nothing is deleted: the losing
-    directory is moved under the winner's evidence/ as a prior copy.
+    Vendor reclassification, legacy buckets, and event/correlation views all
+    describe the same fault when the signature matches. Nothing is deleted:
+    losing directories move under the winner's evidence/ as prior copies.
     """
     winners: dict[str, dict] = {}
     merged: list[dict] = []
     for ident, items in grouped.items():
-        if len(items) == 1:
-            winners[ident] = items[0]
+        active = [item for item in items if not item["legacy"]]
+        if not active:
+            # Keep legacy archives intact when no live bucket owns the ticket.
             continue
-        winner = min(
-            items,
+        winner = max(
+            active,
             key=lambda item: (
-                item["bucket"] != "raise",
-                KIND_RANK.get(item["kind"], 3),
+                item["bucket"] == "raise",
+                -KIND_RANK.get(item["kind"], 3),
                 item["generated"],
-                item["path"].name,
             ),
         )
         for item in items:
@@ -755,7 +777,7 @@ def run(conn, days: int = 30, min_count: int | None = None,
         issue = issues.get(draft["issue_key"])
         verdict = assess(conn, draft, issue, days=days, min_count=min_count)
         vendor, signature = _ticket_identity(draft, issue)
-        ident = _identity(vendor, signature)
+        ident = _identity(signature)
         candidate = {
             "draft": draft,
             "issue": issue,

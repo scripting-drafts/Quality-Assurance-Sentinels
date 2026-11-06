@@ -115,6 +115,7 @@ VENDOR_RULES = [
         r"kernel|oops|panic|BUG:|mce|machine check|edac|nvme|ata[0-9]|ext4|xfs|"
         r"i915|amdgpu|soft lockup|hung task|oom", re.IGNORECASE)),
     ("gnome", re.compile(r"gnome-shell|mutter|gdm|tracker|evolution", re.IGNORECASE)),
+    ("netplan", re.compile(r"netplan", re.IGNORECASE)),
     ("systemd", re.compile(r"systemd|journald|udev|logind|dbus", re.IGNORECASE)),
 ]
 
@@ -138,6 +139,11 @@ VENDOR_META = {
         "name": "GNOME",
         "channel": "GNOME GitLab (https://gitlab.gnome.org)",
         "component": "mutter / gnome-shell",
+    },
+    "netplan": {
+        "name": "netplan.io",
+        "channel": "Launchpad (https://bugs.launchpad.net/ubuntu/+source/netplan.io)",
+        "component": "netplan.io",
     },
     "systemd": {
         "name": "systemd",

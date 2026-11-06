@@ -1,1 +1,1 @@
-./bin/qa logs -f
+./bin/qa logs --all-layers -f

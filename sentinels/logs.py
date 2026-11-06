@@ -285,7 +285,7 @@ def install_autostart() -> dict:
     wrapper.write_text(
         "#!/usr/bin/env bash\n"
         f"cd {shlex.quote(str(config.ROOT))} || exit 1\n"
-        "exec ./bin/qa logs --follow\n",
+        "exec ./bin/qa logs --all-layers --follow\n",
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
@@ -296,7 +296,7 @@ def install_autostart() -> dict:
             "[Desktop Entry]\n"
             "Type=Application\n"
             f"Name={config.PROJECT_NAME} live log\n"
-            "Comment=Live coloured sentinel log with timestamps\n"
+            "Comment=Live all-layer coloured sentinel log with timestamps\n"
             f'Exec="{wrapper}"\n'
             "Terminal=true\n"
             "X-GNOME-Autostart-enabled=true\n"

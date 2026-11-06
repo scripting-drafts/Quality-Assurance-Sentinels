@@ -739,6 +739,24 @@ class LayerLogViewTests(unittest.TestCase):
         ):
             self.assertEqual(logs.journal_tail("unit", 1), ["2026-11-06T10:00:01Z two"])
 
+    def test_autostart_launches_all_layers(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, logs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "bin").mkdir()
+            with mock.patch.object(config, "ROOT", root), \
+                 mock.patch.object(config, "BIN", root / "bin"), \
+                 mock.patch.object(logs.os.path, "expanduser",
+                                   return_value=str(root / "home")):
+                result = logs.install_autostart()
+            wrapper = pathlib.Path(result["wrapper"]).read_text()
+
+        self.assertIn("logs --all-layers --follow", wrapper)
+
     def test_all_layers_prints_both_sources(self):
         import contextlib
         import io

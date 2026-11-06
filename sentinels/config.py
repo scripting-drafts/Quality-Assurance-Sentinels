@@ -7,9 +7,10 @@ PROJECT_SHORT = "QA Sentinels"
 PROJECT_DESCRIPTION = "Security Focused Evidence Collecting Probes"
 # Compatibility slug: repository directory, cron marker, unit names and env var.
 PROJECT_SLUG = "qa-sentinels"
+PROJECT_DIR = "Quality-Assurance-Sentinels"
 
 HOME = pathlib.Path(os.environ.get("HOME", pathlib.Path.home()))
-ROOT = pathlib.Path(os.environ.get("QA_SENTINELS_HOME", HOME / PROJECT_SLUG)).resolve()
+ROOT = pathlib.Path(os.environ.get("QA_SENTINELS_HOME", HOME / PROJECT_DIR)).resolve()
 
 BIN = ROOT / "bin"
 VAR = ROOT / "var"

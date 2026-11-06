@@ -142,7 +142,7 @@ def header(conn) -> list[str]:
         ("notifications", f"{count('SELECT COUNT(*) FROM notifications WHERE delivered=0')} undelivered"),
         ("cross-check", _last_crosscheck(conn)),
     ]
-    lines = ["qa-sentinels live monitor", ""]
+    lines = [f"{config.PROJECT_NAME} live monitor", ""]
     for label, value in rows:
         lines.append(f"  {label:<14} {value}")
     lines += ["", f"  log            {config.VAR / 'cron.log'}", ""]
@@ -213,7 +213,7 @@ def install_autostart() -> dict:
         fh.write(
             "[Desktop Entry]\n"
             "Type=Application\n"
-            "Name=QA sentinels live log\n"
+            f"Name={config.PROJECT_NAME} live log\n"
             "Comment=Live coloured sentinel log with timestamps\n"
             f"Exec={wrapper}\n"
             "Terminal=true\n"

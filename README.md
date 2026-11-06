@@ -1,8 +1,10 @@
-# QA Sentinels
+# Quality Assurance Sentinels
+
+**Security Focused Collector Probes**
 
 **Local monitoring and evidence system**
 
-QA Sentinels periodically samples the system, examines journal and crash records, and organizes findings into reports and verifiable evidence bundles. When an incident warrants closer inspection, it can queue a separate, more privileged tracing run. It also helps correlate repeated failures and prepare vendor bug-report drafts; it does not submit tickets automatically.
+Quality Assurance Sentinels (QA Sentinels) periodically samples the system, examines journal and crash records, and organizes findings into reports and verifiable evidence bundles. When an incident warrants closer inspection, it can queue a separate, more privileged tracing run. It also helps correlate repeated failures and prepare vendor bug-report drafts; it does not submit tickets automatically.
 
 The project pays particular attention to physical CPU core 2. Core affinity is captured as diagnostic context.
 
@@ -65,7 +67,7 @@ make -C src install
 ./bin/qa install-cron
 ```
 
-`cycle` performs one routine pass, running every due layer-1 duty: daily report, notification drain, correlation refresh and crosscheck. The schedule invokes only `cycle`; `tick` and `layer1` remain aliases (`phase1` is legacy). The data and reports remain on the local machine.
+`cycle` performs one routine pass, running every due layer-1 duty: daily report, notification drain, correlation refresh and crosscheck. The schedule invokes only `cycle`; `tick` and `layer1` remain aliases (`phase1` is legacy). The data and reports remain on the local machine. The repository directory, CLI name (`qa`) and systemd unit prefixes remain `qa-sentinels`/`qa` for compatibility.
 
 > **Single installer:** `./install.sh` is interactive and adds either layer: layer 1 (sampler, first cycle, scheduling) and/or layer 2 (deep trace + eBPF). Preview with `./install.sh --dry-run`; unattended installs use `./install.sh --layer1 --layer2 --yes`. Use `--no-layer1` for layer 2 only, and `--systemd` to schedule with a system timer instead of cron.
 

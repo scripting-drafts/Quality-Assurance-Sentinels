@@ -18,6 +18,7 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_NAME="Quality Assurance Sentinels"
 USER_NAME="${QA_SENTINEL_USER:-}"
 TAKEOVER=0
 LAYER2_ONLY=0
@@ -72,7 +73,7 @@ DEEP_PATH=/etc/systemd/system/qa-sentinel-deep.path
 if [[ $LAYER2_ONLY -eq 0 ]]; then
 cat >"$SERVICE" <<EOF
 [Unit]
-Description=qa-sentinels layer-1 routine cycle
+Description=$PROJECT_NAME layer-1 routine cycle
 Documentation=file://$ROOT/README.md
 After=local-fs.target
 
@@ -102,7 +103,7 @@ EOF
 
 cat >"$TIMER" <<EOF
 [Unit]
-Description=Run qa-sentinels every minute
+Description=Run $PROJECT_NAME every minute
 Documentation=file://$ROOT/README.md
 
 [Timer]
@@ -122,7 +123,7 @@ fi
 
 cat >"$DEEP_SERVICE" <<EOF
 [Unit]
-Description=qa-sentinels layer-2 deep trace (tracefs + perf)
+Description=$PROJECT_NAME layer-2 deep trace (tracefs + perf)
 Documentation=file://$ROOT/README.md
 After=local-fs.target
 
@@ -153,7 +154,7 @@ EOF
 
 cat >"$DEEP_PATH" <<EOF
 [Unit]
-Description=Trigger qa-sentinels layer-2 deep trace on queued requests
+Description=Trigger $PROJECT_NAME layer-2 deep trace on queued requests
 Documentation=file://$ROOT/README.md
 
 [Path]

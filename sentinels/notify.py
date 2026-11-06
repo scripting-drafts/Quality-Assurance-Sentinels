@@ -24,7 +24,7 @@ from datetime import timedelta
 from . import config
 from .util import iso, parse_iso, sha256_text, utcnow
 
-APP = "qa-sentinels"
+APP = config.PROJECT_NAME
 
 
 # ---------------------------------------------------------------- environment
@@ -320,7 +320,8 @@ def _drafts_index(conn) -> str | None:
     lines = [
         "# Ticket drafts",
         "",
-        f"Generated {iso()} by qa-sentinels. Drafts are never submitted automatically.",
+        f"Generated {iso()} by {config.PROJECT_NAME}. "
+        "Drafts are never submitted automatically.",
         "",
         "| vendor | title | draft |",
         "|---|---|---|",

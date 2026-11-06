@@ -1,9 +1,15 @@
-"""Central paths and constants for qa-sentinels."""
+"""Central paths and constants for Quality Assurance Sentinels."""
 import os
 import pathlib
 
+PROJECT_NAME = "Quality Assurance Sentinels"
+PROJECT_SHORT = "QA Sentinels"
+PROJECT_DESCRIPTION = "Security Focused Collector Probes"
+# Compatibility slug: repository directory, cron marker, unit names and env var.
+PROJECT_SLUG = "qa-sentinels"
+
 HOME = pathlib.Path(os.environ.get("HOME", pathlib.Path.home()))
-ROOT = pathlib.Path(os.environ.get("QA_SENTINELS_HOME", HOME / "qa-sentinels")).resolve()
+ROOT = pathlib.Path(os.environ.get("QA_SENTINELS_HOME", HOME / PROJECT_SLUG)).resolve()
 
 BIN = ROOT / "bin"
 VAR = ROOT / "var"

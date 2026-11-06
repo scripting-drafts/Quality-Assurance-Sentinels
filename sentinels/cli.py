@@ -451,7 +451,7 @@ def cmd_status(args) -> int:
             lines = chain.read_text().strip().splitlines()
             chain_head = lines[-1] if lines else ""
 
-        print("qa-sentinels status")
+        print(f"{config.PROJECT_NAME} status")
         print(f"  last sample   : {db.meta_get(conn, 'last_sample_ts') or 'never'}")
         print(f"  last ingest   : {db.meta_get(conn, 'last_journal_ingest') or 'never'}")
         print(f"  last inventory: {db.meta_get(conn, 'last_inventory_ts') or 'never'}")
@@ -720,7 +720,7 @@ def cmd_install_cron(args) -> int:
         if proc.returncode != 0:
             print(f"failed to update crontab: {proc.stderr.strip()}")
             return 1
-        print("removed qa-sentinels cron block")
+        print(f"removed {config.PROJECT_NAME} cron block")
         return 0
     text = (text + "\n\n" if text else "") + _cron_block() + "\n"
     proc = subprocess.run(["crontab", "-"], input=text, text=True, capture_output=True)
@@ -996,7 +996,10 @@ def cmd_cycle(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="qa",
-        description="Local QA sentinels for kernel, memory, CPU and process evidence.",
+        description=(
+            f"Quality Assurance Sentinels — {config.PROJECT_DESCRIPTION}: "
+            "kernel, memory, CPU and process evidence."
+        ),
     )
     sub = p.add_subparsers(dest="command", required=True)
 

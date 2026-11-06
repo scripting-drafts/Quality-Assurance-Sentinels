@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single installer for qa-sentinels.
+# Single installer for Quality Assurance Sentinels.
 #
 # Two layers can be added independently:
 #   layer 1  collection: build the sampler, initialise the store,
@@ -27,6 +27,7 @@ set -euo pipefail
 # The installer lives in the checkout, so its own directory is the root. The
 # old /.. suffix targeted the checkout's parent and broke every relative path.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_NAME="Quality Assurance Sentinels"
 
 LAYER1=""
 LAYER2=""
@@ -47,7 +48,7 @@ audit_install() {
   local autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/qa-sentinels-logs.desktop"
   local cron_text="" has_cron=0
 
-  echo "qa-sentinels installation check"
+  echo "$PROJECT_NAME installation check"
   echo "  root: $ROOT"
   echo
   echo "schedulers"
@@ -153,7 +154,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$ROOT"
-[[ -x bin/qa ]] || die "not a qa-sentinels checkout: $ROOT"
+[[ -x bin/qa ]] || die "not a $PROJECT_NAME checkout: $ROOT"
 
 if [[ $CHECK -eq 1 ]]; then
   if audit_install; then exit 0; else exit 1; fi
@@ -178,7 +179,7 @@ ask() {
   [[ "$reply" =~ ^[Yy] ]]
 }
 
-echo "qa-sentinels installer"
+echo "$PROJECT_NAME installer"
 echo "  root: $ROOT"
 echo
 
@@ -248,7 +249,7 @@ run() {
 pstore_unit() {
   cat <<EOF
 [Unit]
-Description=Export qa-sentinels pstore panic summaries
+Description=Export $PROJECT_NAME pstore panic summaries
 Documentation=file://$ROOT/root/PSTORE.md
 After=systemd-pstore.service local-fs.target systemd-journald.service
 Wants=systemd-pstore.service

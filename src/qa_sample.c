@@ -1,4 +1,4 @@
-/* qa_sample.c — kernel/memory/CPU touch-base sampler for qa-sentinels.
+/* qa_sample.c — kernel/memory/CPU touch-base sampler for Quality Assurance Sentinels.
  *
  * Reads only world-readable /proc and /sys interfaces, writes one JSON
  * object per invocation to stdout. Never exits non-zero because one

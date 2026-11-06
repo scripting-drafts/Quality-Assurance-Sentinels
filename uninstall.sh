@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove installed qa-sentinels hooks and build outputs, keeping gathered data.
+# Remove installed Quality Assurance Sentinels hooks and build outputs, keeping gathered data.
 #
 # Default: removes the systemd units, the user cron block, the live-log
 # autostart entry and compiled binaries. Keeps var/, journal/, evidence/,
@@ -15,6 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_NAME="Quality Assurance Sentinels"
 DRY_RUN=0
 ASSUME_YES=0
 KEEP_BUILD=0
@@ -37,7 +38,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$ROOT"
-[[ -f install.sh && -d sentinels ]] || die "not a qa-sentinels checkout: $ROOT"
+[[ -f install.sh && -d sentinels ]] || die "not a $PROJECT_NAME checkout: $ROOT"
 
 run() {
   printf '   $ %s\n' "$*"
@@ -68,7 +69,7 @@ else
   PRIV=(sudo)
 fi
 
-echo "qa-sentinels uninstaller"
+echo "$PROJECT_NAME uninstaller"
 echo "  root: $ROOT"
 echo
 echo "will remove"
@@ -82,7 +83,7 @@ else
   echo "  systemd units: none installed"
 fi
 if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q '>>> qa-sentinels >>>'; then
-  echo "  user cron block: qa-sentinels"
+  echo "  user cron block: $PROJECT_NAME"
 else
   echo "  user cron block: none installed"
 fi
@@ -138,7 +139,7 @@ fi
 if [[ -x bin/qa ]]; then
   try ./bin/qa install-cron --remove
 else
-  echo "   (bin/qa missing: remove the qa-sentinels cron block manually)"
+  echo "   (bin/qa missing: remove the $PROJECT_NAME cron block manually)"
 fi
 
 # ---------------------------------------------------------------- autostart

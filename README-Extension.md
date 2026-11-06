@@ -1,3 +1,5 @@
+# Quality Assurance Sentinels — extension guide
+
 ## Command reference
 
 All commands use `./bin/qa <command>` from the repository root.

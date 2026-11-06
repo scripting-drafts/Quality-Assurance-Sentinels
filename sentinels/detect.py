@@ -27,7 +27,8 @@ EVENT_RULES = [
 
 
 SELF_NOISE = re.compile(
-    r"(?i)qa-sentinels|sudo:auth|auth could not identify password|"
+    r"(?i)qa-sentinels|quality assurance sentinels|quality-assurance-sentinels|"
+    r"sudo:auth|auth could not identify password|"
     r"a password is required\s*;|COMMAND=/usr/bin/true"
 )
 

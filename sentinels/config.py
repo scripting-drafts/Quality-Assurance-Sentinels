@@ -4,7 +4,7 @@ import pathlib
 
 PROJECT_NAME = "Quality Assurance Sentinels"
 PROJECT_SHORT = "QA Sentinels"
-PROJECT_DESCRIPTION = "Security Focused Collector Probes"
+PROJECT_DESCRIPTION = "Security Focused Evidence Collecting Probes"
 # Compatibility slug: repository directory, cron marker, unit names and env var.
 PROJECT_SLUG = "qa-sentinels"
 

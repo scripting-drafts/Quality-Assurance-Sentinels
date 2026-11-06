@@ -1,6 +1,6 @@
 # Quality Assurance Sentinels
 
-**Security Focused Collector Probes**
+**Security Focused Evidence Collecting Probes**
 
 **Local monitoring and evidence system**
 

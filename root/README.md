@@ -37,5 +37,5 @@ Layer 2 runs it only when `CAP_BPF` is present (the deep service has it).
 Without the build, layer 2 records `eBPF: not built` and still runs ftrace/perf.
 Layer 1 never has BPF capability.
 
-Do not disable lockdown, set `perf_event_paranoid=-1`, load unsigned modules or
-give the sentinel blanket sudo. None of that is needed for this QA job.
+Do not disable lockdown, load unsigned modules or give the sentinel blanket
+sudo. Keep `perf_event_paranoid` at the policy value recorded by posture.

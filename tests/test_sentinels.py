@@ -242,6 +242,18 @@ class PostureTests(unittest.TestCase):
         self.assertIn("lockdown_active", data)
         self.assertIsInstance(data["baseline_changed"], list)
 
+    def test_baseline_defaults_perf_event_paranoid_to_minus_one(self):
+        from sentinels import posture
+
+        baseline = posture._new_baseline({
+            "perf_event_paranoid": "4",
+            "lockdown_active": "none",
+            "secure_boot": "0",
+        })
+        self.assertEqual(baseline["perf_event_paranoid"], "-1")
+        self.assertEqual(baseline["lockdown_active"], "none")
+        self.assertEqual(baseline["secure_boot"], "0")
+
 
 class LayerTests(unittest.TestCase):
     def _conn(self):

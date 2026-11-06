@@ -19,6 +19,7 @@ POSTURE_PATH = config.VAR / "posture.json"
 BASELINE_PATH = config.VAR / "posture-baseline.json"
 SUDO_CACHE_PATH = config.VAR / "sudo-probe.json"
 BASELINE_KEYS = ("perf_event_paranoid", "lockdown_active", "secure_boot")
+DEFAULT_PERF_EVENT_PARANOID = "-1"
 
 
 def _active_lockdown(raw: str) -> str:
@@ -31,6 +32,18 @@ def _baseline() -> dict:
         return json.loads(read_text(str(BASELINE_PATH)) or "{}")
     except json.JSONDecodeError:
         return {}
+
+
+def _new_baseline(data: dict) -> dict:
+    """Baseline values for a new/rebaselined posture.
+
+    ``perf_event_paranoid`` is a policy expectation rather than a snapshot:
+    the default is -1 so the sentinel reports drift instead of silently
+    accepting a host that blocks the configured perf collection path.
+    """
+    baseline = {key: data.get(key) for key in BASELINE_KEYS}
+    baseline["perf_event_paranoid"] = DEFAULT_PERF_EVENT_PARANOID
+    return baseline
 
 
 def _cap_eff() -> int:
@@ -126,8 +139,9 @@ def record(conn, force: bool = False, rebaseline: bool = False) -> dict:
     data = collect(fresh=True)
     config.VAR.mkdir(parents=True, exist_ok=True)
     if rebaseline or not BASELINE_PATH.exists():
-        write_json(BASELINE_PATH, {key: data.get(key) for key in BASELINE_KEYS})
-        data["baseline"] = {key: data.get(key) for key in BASELINE_KEYS}
+        baseline = _new_baseline(data)
+        write_json(BASELINE_PATH, baseline)
+        data["baseline"] = baseline
         data["baseline_changed"] = []
     write_json(POSTURE_PATH, data)
     previous = db.meta_get(conn, "posture_verdict")

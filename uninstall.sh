@@ -59,6 +59,8 @@ UNIT_FILES=(
   /etc/systemd/system/qa-pstore-export.service
   /etc/systemd/system/qa-hardware.service
   /etc/systemd/system/qa-hardware.timer
+  /etc/systemd/system/qa-lsm-read.service
+  /etc/systemd/system/qa-lsm-read.timer
 )
 AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/qa-sentinels-logs.desktop"
 BUILT=(
@@ -136,6 +138,8 @@ if [[ ${#found_units[@]} -gt 0 ]]; then
     try "${PRIV[@]}" systemctl daemon-reload
   fi
 fi
+[[ -e /usr/local/sbin/qa-lsm-read-helper ]] && try "${PRIV[@]}" rm -f /usr/local/sbin/qa-lsm-read-helper
+[[ -e var/lsm-state-root.json ]] && try "${PRIV[@]}" rm -f var/lsm-state-root.json
 
 # ---------------------------------------------------------------- scheduling
 if [[ -x bin/qa ]]; then

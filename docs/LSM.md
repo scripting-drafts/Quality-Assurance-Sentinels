@@ -28,6 +28,25 @@ configuration, and recent AppArmor/SELinux denials.
 
 `cycle` scans every `QA_LSM_INTERVAL_S` seconds (default 300).
 
+## Root handoff
+
+AppArmor profile state is root-only, even for the capability-scoped operator
+service. Install the dedicated root reader:
+
+```bash
+sudo ./root/install-lsm-read.sh
+systemctl status qa-lsm-read.timer qa-lsm-read.service
+```
+
+The installer places `/usr/local/sbin/qa-lsm-read-helper` and a timer that
+refreshes `var/lsm-state-root.json` every five minutes
+(root:<operator-group>, 0640). The helper reads only LSM state; the operator
+collector reads the handoff, computes the digest, and writes findings. If the
+handoff is missing or stale, the collector falls back to a direct read and
+reports `lsm.state_unreadable` when securityfs denies access.
+
+Remove it with `sudo ./root/install-lsm-read.sh --uninstall`.
+
 ## Rules
 
 | Rule | Severity | Meaning |
@@ -78,7 +97,8 @@ state, so it is recorded as `ima.readable=false` instead of
 
 The monitor is read-only. It cannot enforce policy, load profiles, or replace
 AppArmor/SELinux tooling. Some securityfs files may require root; unreadable
-state is reported, not invented. When `cycle` cannot read required LSM state,
+state is reported, not invented. The root LSM helper closes the AppArmor/IMA
+visibility gap without giving the Python collector or database root. When `cycle` cannot read required LSM state,
 it records `lsm.state_unreadable` and returns a non-zero cycle status.
 Entropy in profile digests can cause benign `lsm.state_changed` warnings;
 review before dismissing.

@@ -101,6 +101,10 @@ LSM_INTERVAL_S = max(60, int(os.environ.get("QA_LSM_INTERVAL_S", "300")))
 LSM_DENIAL_ALERT = max(1, int(os.environ.get("QA_LSM_DENIAL_ALERT", "1")))
 LSM_TIMEOUT_S = max(5, int(os.environ.get("QA_LSM_TIMEOUT_S", "20")))
 LSM_RETENTION_DAYS = max(1, int(os.environ.get("QA_LSM_RETENTION_DAYS", "30")))
+LSM_ROOT_HANDOFF = VAR / "lsm-state-root.json"
+LSM_ROOT_HANDOFF_MAX_AGE_S = max(
+    300, int(os.environ.get("QA_LSM_ROOT_HANDOFF_MAX_AGE_S", "1800"))
+)
 
 # capture breadth. Defaults are production-sane; the "no artificial cap" mode is
 # opt-in because full-priority ingest and forever retention can fill a disk.

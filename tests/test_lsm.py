@@ -1,9 +1,11 @@
 """Tests for Linux Security Modules parsing and rules."""
+import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from sentinels import lsm
+from sentinels import config, lsm
 
 
 class LsmParseTests(unittest.TestCase):
@@ -42,6 +44,24 @@ class LsmParseTests(unittest.TestCase):
             errors = []
             self.assertEqual(lsm._read_lsm(path, errors, "ima policy"), "")
         self.assertEqual(errors, [])
+
+
+class LsmHandoffTests(unittest.TestCase):
+    def test_fresh_root_handoff_is_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "handoff.json"
+            path.write_text(json.dumps({
+                "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "lsm": {"active": ["apparmor"], "errors": []},
+            }))
+            old = config.LSM_ROOT_HANDOFF
+            config.LSM_ROOT_HANDOFF = path
+            try:
+                state = lsm._handoff_state()
+            finally:
+                config.LSM_ROOT_HANDOFF = old
+        self.assertEqual(state["active"], ["apparmor"])
+        self.assertTrue(state["digest"])
 
 
 class LsmRuleTests(unittest.TestCase):

@@ -14,6 +14,7 @@ All commands use `./bin/qa <command>` from the repository root.
 | Security provenance | `security` | Detect unexpected user/root code execution, root-owned state, and audit coverage gaps |
 | Evidence | `evidence`, `verify` | Export and validate hash-manifested bundles |
 | Ticket workflow | `tickets`, `raise`, `notify`, `crosscheck` | Draft, rank, notify, and recheck candidate vendor reports; open hardware/LSM/security findings are drafted too |
+| SIEM export | `export`, `forward` | Emit redacted JSONL or forward findings/events to a QA SIEM endpoint |
 | Deep diagnostics | `deploy-layer2` (`deploy-phase2` legacy), `deep` | Configure and run queued tracing |
 | Monitoring display | `logs` | Read, rotate or follow timestamped activity |
 

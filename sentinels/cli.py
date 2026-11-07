@@ -14,7 +14,8 @@ from datetime import datetime
 
 from . import (
     boot, config, correlate, crosscheck, db, deep, detect, evidence, hardware, holds, ingest,
-    inventory, logs, lsm, notify, posture, raise_ticket, report, sampler, security, tickets, trace, triage,
+    inventory, logs, lsm, notify, posture, raise_ticket, report, sampler, security, siem,
+    tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
 
@@ -510,6 +511,48 @@ def cmd_logs(args) -> int:
     else:
         for line in logs.tail_lines(path, args.lines):
             print(logs.format_line(line, color), flush=True)
+    return 0
+
+
+def cmd_export(args) -> int:
+    try:
+        with db.session() as conn:
+            events = siem.build_events(
+                conn, args.since, args.types, args.limit
+            )
+    except siem.SiemError as exc:
+        print(f"qa export: {exc}", file=sys.stderr)
+        return 2
+    lines = "".join(
+        json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+        for event in events
+    )
+    if args.output:
+        target = pathlib.Path(args.output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(lines, encoding="utf-8")
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+    else:
+        sys.stdout.write(lines)
+    return 0
+
+
+def cmd_forward(args) -> int:
+    try:
+        cfg = siem.load_config(args.config)
+        with db.session() as conn:
+            result = siem.forward(
+                conn, cfg, since=args.since, types=args.types,
+                limit=args.limit, dry_run=args.dry_run,
+            )
+    except siem.SiemError as exc:
+        print(f"qa forward: {exc}", file=sys.stderr)
+        return 2
+    if not args.dry_run:
+        print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 
@@ -1301,6 +1344,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--history", action="store_true", help="list past cross-check runs")
     s.add_argument("--limit", type=int, default=10)
     s.set_defaults(func=cmd_crosscheck)
+
+    s = sub.add_parser("export", help="export redacted events as JSONL for a SIEM")
+    s.add_argument("--since", default="24h", help="24h, 7d, or ISO-8601 timestamp")
+    s.add_argument("--types", help="comma-separated: findings,events,crashes,boots,hardware,lsm,tickets")
+    s.add_argument("--limit", type=int, default=5000)
+    s.add_argument("--format", choices=("jsonl",), default="jsonl")
+    s.add_argument("--output", help="write JSONL to a file instead of stdout")
+    s.set_defaults(func=cmd_export)
+
+    s = sub.add_parser("forward", help="forward redacted events to a QA SIEM endpoint")
+    s.add_argument("--config", default="config/siem.json")
+    s.add_argument("--since", help="override the configured lookback")
+    s.add_argument("--types", help="comma-separated event types")
+    s.add_argument("--limit", type=int, default=5000)
+    s.add_argument("--dry-run", action="store_true", help="print JSONL without sending")
+    s.set_defaults(func=cmd_forward)
 
     s = sub.add_parser("logs", help="live coloured sentinel log with timestamps")
     s.add_argument("-f", "--follow", action="store_true")

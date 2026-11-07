@@ -61,6 +61,8 @@ UNIT_FILES=(
   /etc/systemd/system/qa-hardware.timer
   /etc/systemd/system/qa-lsm-read.service
   /etc/systemd/system/qa-lsm-read.timer
+  /etc/systemd/system/qa-siem-forward.service
+  /etc/systemd/system/qa-siem-forward.timer
 )
 AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/qa-sentinels-logs.desktop"
 BUILT=(

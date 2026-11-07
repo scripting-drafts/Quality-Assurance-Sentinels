@@ -80,7 +80,7 @@ make -C src install
 ./bin/qa preflight             # Check prerequisites and access
 ```
 
-`var/cron.log` rotates by copytruncate at `QA_LOG_MAX_MB` (default 20 MiB) and keeps `QA_LOG_KEEP` numbered files (default 10), so `qa logs --follow` survives rotation. Force a rotation with `./bin/qa logs --rotate`.
+`var/cron.log` is appended by both the cron entry and `qa-sentinel.service`. It rotates by copytruncate at `QA_LOG_MAX_MB` (default 20 MiB) and keeps `QA_LOG_KEEP` numbered files (default 10), so `qa logs --follow` survives rotation. Force a rotation with `./bin/qa logs --rotate`.
 
 Notifications are queued when drafts or ready correlations appear. Delivery retries with backoff, failed rows stay queued, and `qa notify --drain` exits non-zero while any delivery fails; `qa status` reports whether the desktop channel is reachable.
 

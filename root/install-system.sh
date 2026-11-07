@@ -59,6 +59,10 @@ if ! runuser -u "$USER_NAME" -- test -w "$ROOT"; then
 fi
 GROUP_NAME="$(id -gn "$USER_NAME")"
 
+if [[ ! -e "$ROOT/var/cron.log" ]]; then
+  install -o "$USER_NAME" -g "$GROUP_NAME" -m 0600 /dev/null "$ROOT/var/cron.log"
+fi
+
 if [[ ! -x "$ROOT/bin/qa" || ! -x "$ROOT/bin/qa_sample" ]]; then
   echo "building sampler as $USER_NAME"
   runuser -u "$USER_NAME" -- make -C "$ROOT/src" install
@@ -84,6 +88,8 @@ Group=$GROUP_NAME
 SupplementaryGroups=adm systemd-journal
 Environment=QA_SENTINELS_HOME=$ROOT
 Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:$ROOT/var/cron.log
+StandardError=append:$ROOT/var/cron.log
 AmbientCapabilities=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_SYS_RAWIO CAP_PERFMON CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_SYS_RAWIO CAP_PERFMON CAP_SYS_ADMIN
 NoNewPrivileges=yes

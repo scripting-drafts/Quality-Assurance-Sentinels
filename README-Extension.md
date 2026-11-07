@@ -6,7 +6,7 @@ All commands use `./bin/qa <command>` from the repository root.
 
 | Area | Commands | What they do |
 | --- | --- | --- |
-| Setup and operations | `install.sh`, `uninstall.sh`, `init`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, inspect prerequisites, check scheduling and security posture |
+| Setup and operations | `install.sh`, `uninstall.sh`, `init`, `compat`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, check Ubuntu upgrade compatibility, inspect prerequisites, check scheduling and security posture |
 | Routine collection | `cycle` (`tick`, `layer1`; `phase1` legacy), `sample`, `ingest`, `inventory`, `report` | Capture system state and run every due layer-1 duty |
 | Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, events, their relationships, and held/outdated packages |
 | Hardware health | `hardware` | Collect RAS/EDAC/AER/APEI, SMART/NVMe, GPU, BMC, sensors, turbostat/PCM/uncore, vendor logs |
@@ -21,6 +21,7 @@ All commands use `./bin/qa <command>` from the repository root.
 Useful examples:
 
 ```bash
+./bin/qa compat --strict
 ./bin/qa report --kind daily --hours 24
 ./bin/qa crosscheck --deep
 ./bin/qa notify --test
@@ -82,6 +83,7 @@ Optional reporter details may be put in `config/identity.env`, using `config/ide
 - [`src/`](src/) — C sampler and Makefile.
 - [`root/`](root/) — optional elevated system collection, systemd integration, and deep tracing.
 - [`config/`](config/) — configuration notes and optional identity template.
+- [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — Ubuntu 22.04-26.10 baseline and upgrade checklist.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — security provenance rules, auditd coverage, and limits.
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) — hardware-health sources, privileges, scheduling, and limits.
 - [`docs/LSM.md`](docs/LSM.md) — Linux Security Modules state, drift, denials, and limits.

@@ -13,9 +13,9 @@ import time
 from datetime import datetime
 
 from . import (
-    boot, config, correlate, crosscheck, db, deep, detect, evidence, hardware, holds, ingest,
-    inventory, logs, lsm, notify, posture, raise_ticket, report, sampler, security, siem,
-    tickets, trace, triage,
+    boot, compat, config, correlate, crosscheck, db, deep, detect, evidence, hardware,
+    holds, ingest, inventory, logs, lsm, notify, posture, raise_ticket, report, sampler,
+    security, siem, tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
 
@@ -656,6 +656,12 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_compat(args) -> int:
+    data = compat.report()
+    print(json.dumps(data, indent=2, sort_keys=True))
+    return 0 if data["supported"] or not args.strict else 1
+
+
 def cmd_preflight(args) -> int:
     checks = []
     rc, out, err = run([str(config.SAMPLE_BIN)], timeout=30)
@@ -672,6 +678,14 @@ def cmd_preflight(args) -> int:
             f"physical core {config.CORE2_PHYSICAL_ID} present",
             bool(config.CORE2_CPUS),
             f"logical CPUs {config.CORE2_CPUS}",
+        )
+    )
+    compatibility = compat.report()
+    checks.append(
+        (
+            "Ubuntu compatibility",
+            compatibility["supported"],
+            compatibility["summary"],
         )
     )
     post = posture.collect()
@@ -1443,6 +1457,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", action="store_true", help="collect what is allowed and list skips")
     s.add_argument("--enqueue", action="store_true", help="queue only; do not execute")
     s.set_defaults(func=cmd_deep)
+
+    s = sub.add_parser("compat", help="report Ubuntu/Python/SQLite/systemd upgrade compatibility")
+    s.add_argument("--strict", action="store_true", help="exit non-zero outside the documented baseline")
+    s.set_defaults(func=cmd_compat)
 
     s = sub.add_parser(
         "preflight",

@@ -2,7 +2,6 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 
 from sentinels import config, hardware
@@ -81,32 +80,6 @@ class StorageTests(unittest.TestCase):
         })
         self.assertEqual(metrics["temperature_c"], 44)
         self.assertEqual(metrics["available_spare"], 100)
-
-
-class StorageHandoffTests(unittest.TestCase):
-    def test_root_handoff_is_parsed_without_device_access(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "handoff.json"
-            path.write_text(json.dumps({
-                "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "devices": {
-                    "nvme0n1": {
-                        "smartctl": {
-                            "model_name": "Test NVMe",
-                            "smart_status": {"passed": True},
-                            "temperature": {"current": 45},
-                        }
-                    }
-                },
-            }))
-            old = config.HARDWARE_STORAGE_HANDOFF
-            config.HARDWARE_STORAGE_HANDOFF = path
-            try:
-                result = hardware._collect_storage()
-            finally:
-                config.HARDWARE_STORAGE_HANDOFF = old
-        self.assertEqual(result["status"], "ok")
-        self.assertTrue(any("Test NVMe" in str(value) for _key, value in result["items"]))
 
 
 class GpuTests(unittest.TestCase):

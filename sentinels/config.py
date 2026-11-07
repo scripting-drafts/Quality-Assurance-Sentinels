@@ -88,8 +88,6 @@ HARDWARE_STORAGE_TEMP_ALERT_C = int(os.environ.get("QA_HARDWARE_STORAGE_TEMP_ALE
 HARDWARE_SOURCES_PATH = CONFIG_DIR / "hardware-sources.json"
 HARDWARE_VENDOR_LINES = max(10, int(os.environ.get("QA_HARDWARE_VENDOR_LINES", "200")))
 HARDWARE_RETENTION_DAYS = max(1, int(os.environ.get("QA_HARDWARE_RETENTION_DAYS", "14")))
-HARDWARE_STORAGE_HANDOFF = VAR / "hardware-storage-root.json"
-HARDWARE_STORAGE_HANDOFF_MAX_AGE_S = max(300, int(os.environ.get("QA_HARDWARE_STORAGE_HANDOFF_MAX_AGE_S", "1800")))
 HARDWARE_REQUIRED_SOURCES = tuple(
     item.strip() for item in os.environ.get(
         "QA_HARDWARE_REQUIRED_SOURCES",

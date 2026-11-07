@@ -39,27 +39,23 @@ counters. Install the capability-scoped timers:
 
 ```bash
 sudo ./root/install-hardware.sh
-systemctl status qa-hardware.timer qa-hardware-storage.timer
-journalctl -u qa-hardware.service -u qa-hardware-storage.service -n 50
+systemctl status qa-hardware.timer
+journalctl -u qa-hardware.service -n 50
 ```
 
-The operator hardware timer runs as the operator with narrow capabilities. A
-separate **root-owned** probe is installed as
-`/usr/local/sbin/qa-hardware-storage-probe`; it writes
-`var/hardware-storage-root.json` (root:<operator-group>, 0640). The operator
-collector reads that handoff, so root is only granted to this probe and never
-to the Python collector or the QA database.
+The hardware timer runs as the operator with narrow capabilities:
+`CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_SYS_PTRACE`,
+`CAP_SYS_RAWIO`, `CAP_PERFMON`, `CAP_BPF`, and `CAP_SYS_ADMIN`. The Python
+collector and the QA database stay operator-owned; no root probe or handoff
+file is installed.
 
-The probe owns every read that requires root:
+The capability set covers SMART/NVMe device access and the root-only rasdaemon
+database. Layer 1 (`root/install-system.sh`) uses the same capabilities, so
+`qa cycle` can collect storage and RAS state without running as root.
 
-- SMART/NVMe device access (`CAP_SYS_RAWIO`, `CAP_DAC_OVERRIDE`)
-- the root-only rasdaemon database (`ras-mc-ctl --summary/--errors`)
-- `turbostat`, whose `access(R_OK)` check ignores ambient capabilities
-- LSM state (AppArmor profiles, IMA policy) and file ownership
-
-The service also needs `CAP_CHOWN` to hand the file to the operator group and
-`CAP_SYS_NICE` for turbostat. The installer places the root-owned lockdown
-helper at `/usr/local/sbin/qa-lsm-enforce-lockdown`.
+`turbostat` is scoped out when `/dev/cpu/*/msr` is not readable: its
+`access(2)` check cannot be satisfied by ambient capabilities. No root helper
+is installed for it.
 
 Remove them:
 
@@ -79,9 +75,10 @@ ras,storage,gpu,bmc,sensors,turbostat,pcm,uncore,vendor
 `qa hardware discover` writes the host's scoped contract to
 `config/hardware-sources.json`. Sources the platform cannot provide are listed
 under `not_applicable` with a reason and are omitted from `required_sources`.
-This host is an AMD desktop without a BMC, so `pcm` (Intel-only) and `bmc` are
-scoped out explicitly rather than reported as permanent failures. All other
-required sources must be `ok`; `failed_sources` must be empty.
+This host is an AMD desktop without a BMC and without readable MSR, so `pcm`
+(Intel-only), `bmc`, and `turbostat` are scoped out explicitly rather than
+reported as permanent failures. All other required sources must be `ok`;
+`failed_sources` must be empty.
 
 `vendor` is **mandatory**: configure `config/hardware-sources.json` with at
 least one readable vendor log, or the hardware source and cycle fail.
@@ -143,7 +140,8 @@ the database or printed.
 ## Limits
 
 - SMART/NVMe, IPMI, PCM, turbostat and uncore often need privileges. This
-  host routes the root-only reads through the single root probe handoff.
+  host uses capability-scoped operator services and explicitly scopes out
+  sources the platform cannot provide.
 - ACPI tables are recorded as hashes/metadata, not fully decoded.
 - The tier does not read BMC firmware, PCIe analyzer captures, DRAM patrol
   scrub, JTAG, or vendor debug registers.

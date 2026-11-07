@@ -102,38 +102,11 @@ def parse_denials(lines: list[str]) -> dict:
     return out
 
 
-def _handoff_state() -> dict | None:
-    """Read the root probe's LSM handoff when it is fresh.
-
-    The root probe can read AppArmor profiles and IMA policy that securityfs
-    denies to the unprivileged collector.  It writes state only; the operator
-    still computes the digest and stores the finding.
-    """
-    path = config.HARDWARE_STORAGE_HANDOFF
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        age = (utcnow() - parse_iso(data.get("generated"))).total_seconds()
-    except (OSError, ValueError, TypeError):
-        return None
-    if age > config.HARDWARE_STORAGE_HANDOFF_MAX_AGE_S:
-        return None
-    state = data.get("lsm")
-    if not isinstance(state, dict):
-        return None
-    state = json.loads(json.dumps(state))
-    state.setdefault("errors", [])
-    state["digest"] = _state_digest(state)
-    return state
-
-
 def collect_state(
     securityfs: str | Path = "/sys/kernel/security",
     selinux: str | Path = "/sys/fs/selinux",
     proc_sys: str | Path = "/proc/sys/kernel",
 ) -> dict:
-    handoff = _handoff_state()
-    if handoff:
-        return handoff
     securityfs = Path(securityfs)
     selinux = Path(selinux)
     proc_sys = Path(proc_sys)

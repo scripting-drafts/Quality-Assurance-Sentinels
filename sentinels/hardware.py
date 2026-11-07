@@ -301,17 +301,9 @@ def _collect_ras() -> dict:
     statuses = []
     tools = _which("ras-mc-ctl")
     raw = []
-    handoff = _storage_handoff() or {}
-    root_ras = handoff.get("ras") if isinstance(handoff.get("ras"), dict) else {}
     if tools:
         for arg in ("--summary", "--errors"):
-            cached = root_ras.get(arg) if isinstance(root_ras.get(arg), dict) else {}
-            if cached:
-                rc = cached.get("rc", 1)
-                out = str(cached.get("out") or "")
-                err = str(cached.get("error") or "")
-            else:
-                rc, out, err = _run([tools, arg])
+            rc, out, err = _run([tools, arg])
             raw.append(f"# ras-mc-ctl {arg}\n{out}\n{err}".strip())
             if rc == 0:
                 statuses.append("ok")
@@ -453,59 +445,11 @@ def _storage_add(device: str, metrics: dict, prefix: str,
                                      f"{device}: {key}={value}"))
 
 
-def _storage_handoff() -> dict | None:
-    path = config.HARDWARE_STORAGE_HANDOFF
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        from .util import parse_iso
-        age = (utcnow() - parse_iso(data.get("generated"))).total_seconds()
-    except (OSError, ValueError, TypeError):
-        return None
-    if age > config.HARDWARE_STORAGE_HANDOFF_MAX_AGE_S:
-        return None
-    if not isinstance(data.get("devices"), dict):
-        return None
-    return data
-
-
 def _collect_storage() -> dict:
-    handoff = _storage_handoff()
     items = []
     findings = []
     statuses = []
     raw = []
-    if handoff:
-        for device, entry in sorted(handoff["devices"].items()):
-            for key, parser in (("smartctl", parse_smart_json), ("nvme", parse_nvme_json)):
-                payload = entry.get(key)
-                if payload is None:
-                    continue
-                if not isinstance(payload, dict):
-                    statuses.append("unavailable")
-                    continue
-                err = str(payload.get("error") or payload.get("stderr") or "")
-                messages = " ".join(
-                    str(item.get("string") or "")
-                    for item in (payload.get("smartctl") or {}).get("messages", [])
-                )
-                metrics = parser(payload)
-                if not any(value is not None for value in metrics.values()):
-                    # No SMART attributes is normal for USB bridges and card
-                    # readers.  Permission failures remain visible; genuinely
-                    # unsupported devices must not fail the required source.
-                    if _perm_error(err + messages):
-                        statuses.append("needs-root")
-                    continue
-                if _perm_error(messages):
-                    statuses.append("needs-root")
-                    continue
-                _storage_add(device, metrics, key, items, findings)
-                statuses.append(
-                    "ok" if payload.get("rc") in (0, None) else "partial"
-                )
-        if statuses:
-            return _result(_combine(statuses), items, findings, json.dumps(handoff)[:20000])
-
     devices = []
     for path in sorted(Path("/sys/block").iterdir()):
         if _storage_status(path.name):
@@ -704,17 +648,6 @@ def _collect_sensors() -> dict:
 
 
 def _collect_turbostat() -> dict:
-    handoff = _storage_handoff()
-    if handoff and isinstance(handoff.get("turbostat"), dict):
-        result = handoff["turbostat"]
-        out = str(result.get("out") or "")
-        err = str(result.get("error") or "")
-        if result.get("rc") == 0 and out:
-            return _result(
-                "ok", [("turbostat/summary", _clip(out, 8000))], raw=out
-            )
-        status = "needs-root" if _perm_error(out + err) else "unavailable"
-        return _result(status, reason=(out + err)[:300])
     exe = _which("turbostat")
     if not exe:
         return _result("unavailable", reason="turbostat not installed")
@@ -946,6 +879,11 @@ def discover_vendor() -> dict:
     if not (bmc.get("available") or (redfish or {}).get("enabled")):
         not_applicable["bmc"] = (
             "no IPMI/BMC or configured Redfish endpoint was detected"
+        )
+    if not os.access("/dev/cpu/0/msr", os.R_OK):
+        not_applicable["turbostat"] = (
+            "turbostat requires readable /dev/cpu/*/msr; its access(2) check "
+            "cannot be satisfied by the capability-scoped operator service"
         )
     all_sources = (
         "ras", "storage", "gpu", "bmc", "sensors",

@@ -52,10 +52,11 @@ not treat it as drift.
 `lsm.lockdown.none` is addressed explicitly, not silently waived:
 
 ```bash
-sudo /usr/local/sbin/qa-lsm-enforce-lockdown        # installed by install-hardware.sh
-# or before installation:
 sudo ./root/lsm-enforce-lockdown.sh integrity
 ```
+
+No lockdown helper is installed by the hardware service; enforcement is an
+explicit operator action.
 
 The script writes `integrity` (or `confidentiality`) to
 `/sys/kernel/security/lockdown` and verifies the selection. For persistence
@@ -76,10 +77,8 @@ state, so it is recorded as `ima.readable=false` instead of
 ## Limits
 
 The monitor is read-only. It cannot enforce policy, load profiles, or replace
-AppArmor/SELinux tooling. Some securityfs files may require root or the
-capability-scoped layer-1 unit; unreadable state is reported, not invented.
-When `cycle` cannot read required LSM state, it records
-`lsm.state_unreadable` and returns a non-zero cycle status. Use the systemd
-layer-1 unit or a privileged read to close that coverage gap.
+AppArmor/SELinux tooling. Some securityfs files may require root; unreadable
+state is reported, not invented. When `cycle` cannot read required LSM state,
+it records `lsm.state_unreadable` and returns a non-zero cycle status.
 Entropy in profile digests can cause benign `lsm.state_changed` warnings;
 review before dismissing.

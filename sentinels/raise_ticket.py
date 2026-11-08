@@ -127,11 +127,15 @@ def assess(conn, draft: dict, issue: dict | None, days: int = 30,
     elif hold.get("mass_hold"):
         hold_detail = (
             f"system-wide hold: {hold.get('held_total')} packages pinned, "
-            f"{hold.get('held_installed')} installed"
+            f"{hold.get('held_installed')} installed (not attributed to this crash)"
         )
     else:
         hold_detail = "no held, outdated package matches this crash"
-    hold_explained = bool(outdated) or bool(hold.get("mass_hold"))
+    # A mass hold only explains an unowned crash. For a crash whose executable
+    # has a known owner, only that owner family's outdated held packages matter.
+    hold_explained = bool(outdated) or (
+        bool(hold.get("mass_hold")) and not hold.get("owner")
+    )
     check("build-current", not hold_explained, hold_detail)
 
     viable = all(c["ok"] for c in checks)

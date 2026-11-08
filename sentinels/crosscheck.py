@@ -11,8 +11,31 @@ This job compares three things and reports only differences:
 """
 from __future__ import annotations
 
+import json
+
 from . import boot, config, correlate, notify, report, tickets
 from .util import iso, sha256_text
+
+
+def _staged_issue_keys() -> set[str]:
+    """Issue keys already staged as ticket records, even without a live draft.
+
+    Historical tickets can outlive the routine draft window. They remain valid
+    staged records and must not be reported as missing drafts.
+    """
+    keys: set[str] = set()
+    for root in (config.RAISE_DIR, config.STANDBY_DIR, config.REJECT_DIR):
+        if not root.exists():
+            continue
+        for manifest in root.glob("*/evidence/manifest.json"):
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            key = data.get("issue_key")
+            if key:
+                keys.add(str(key))
+    return keys
 
 
 def _drift_key(stale: list[dict], missing: list[dict],
@@ -31,7 +54,7 @@ def run(conn, days: int = 30, deep: bool = False, notify_drift: bool = True) -> 
 
     current = {issue["key"]: issue for issue in tickets.collect_issues(conn, days)}
     drafts = [dict(r) for r in conn.execute("SELECT * FROM ticket_drafts ORDER BY ts")]
-    draft_keys = {d["issue_key"] for d in drafts}
+    draft_keys = {d["issue_key"] for d in drafts} | _staged_issue_keys()
     selected = {
         issue["key"] for issue in tickets.select_issues(
             list(current.values()), config.MAX_TICKETS

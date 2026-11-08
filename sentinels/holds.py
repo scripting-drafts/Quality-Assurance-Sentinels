@@ -79,12 +79,13 @@ def counts() -> dict:
 
 
 def _related(name: str, owner: str | None) -> bool:
-    if owner and name == owner:
-        return True
     if owner:
-        family = owner.split("-")[0]
-        if family and name.startswith(family + "-"):
+        if name == owner:
             return True
+        family = owner.split("-")[0]
+        return bool(family) and name.startswith(family + "-")
+    # Module families are only a fallback when the executable has no owner.
+    # Otherwise every held nvidia-* package would be attributed to every crash.
     return name.startswith(MODULE_PREFIXES)
 
 

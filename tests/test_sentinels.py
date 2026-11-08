@@ -119,6 +119,14 @@ class RedactionTests(unittest.TestCase):
         self.assertIn("/home/<user>", out)
         self.assertIn("<serial>", out)
 
+    def test_submitted_crash_id_is_preserved_but_other_uuids_are_not(self):
+        crash_id = "bp-3bb56c4b-1d41-4581-b552-219800261026"
+        local_id = "159a8019-9eaf-cfc0-2cc2-a20ac17e1332"
+        out = redact(f"Crash ID: {crash_id} local: {local_id}")
+        self.assertIn(crash_id, out)
+        self.assertNotIn(local_id, out)
+        self.assertIn("<uuid>", out)
+
 
 class ReportAggregationTests(unittest.TestCase):
     def test_counts_are_weighted(self):
@@ -1112,6 +1120,56 @@ class HeldPackageTests(unittest.TestCase):
         self.assertNotIn("vim", matched)              # unrelated hold
         self.assertNotIn("nvidia-driver-595", matched)  # not installed
         self.assertEqual([r["package"] for r in result["outdated"]], ["nvidia-settings"])
+
+    def test_unrelated_held_family_does_not_block_another_owner(self):
+        from unittest import mock
+        from sentinels import holds, packages
+
+        holds.held.cache_clear()
+        holds._policies.cache_clear()
+        installed = (
+            ("firefox-esr", "153.6.0esr"), ("nvidia-settings", "610.43.02"),
+            ("nvidia-driver-550", "550.163.01"),
+        )
+        try:
+            with mock.patch.object(packages, "installed", return_value=installed), \
+                 mock.patch.object(packages, "owner",
+                                   return_value={"package": "firefox-esr"}), \
+                 mock.patch.object(holds, "held", return_value=(
+                     "nvidia-settings", "nvidia-driver-550")), \
+                 mock.patch.object(holds, "_policies", return_value={
+                     "nvidia-settings": {"installed": "610.43.02",
+                                         "candidate": "615.71.10"},
+                 }):
+                result = holds.relevant("/usr/lib/firefox-esr/firefox-bin")
+        finally:
+            holds.held.cache_clear()
+            holds._policies.cache_clear()
+        self.assertEqual(result["relevant"], [])
+        self.assertEqual(result["outdated"], [])
+
+    def test_draft_hides_an_unrelated_global_hold(self):
+        from sentinels import tickets
+        from sentinels.util import iso
+
+        issue = {
+            "key": "ff", "vendor": "mozilla",
+            "signature": "firefox-esr SIGSEGV",
+            "display": "firefox-esr SIGSEGV",
+            "kind": "crash", "count": 1, "severity": "critical",
+            "first": iso(), "last": iso(),
+            "rows": [{
+                "ts": iso(), "comm": "firefox-esr",
+                "exe": "/usr/lib/firefox-esr/firefox-bin",
+                "sig": "SIGSEGV", "context": "ctx",
+            }],
+            "held": {
+                "owner": "firefox-esr", "mass_hold": True, "held_total": 41874,
+                "held_installed": 31, "outdated": [], "relevant": [],
+            },
+        }
+        _, body = tickets._draft(issue, None, {}, False)
+        self.assertNotIn("Global hold", body)
 
     def test_global_hold_is_flagged(self):
         from unittest import mock
@@ -2115,6 +2173,37 @@ class RejectedReportTests(unittest.TestCase):
         self.assertIn("build-current", failed)
         self.assertIn("held-outdated", " ".join(verdict["reasons"]))
 
+    def test_mass_hold_only_blocks_unowned_crashes(self):
+        from sentinels import raise_ticket
+        from sentinels.util import iso
+
+        conn = self._conn()
+        issue = self._issue(key="ff", held=False)
+        issue["vendor"] = "mozilla"
+        issue["signature"] = "firefox-esr SIGSEGV"
+        issue["count"] = 1
+        issue["rows"] = [{
+            "ts": iso(), "comm": "firefox-esr",
+            "exe": "/usr/lib/firefox-esr/firefox-bin", "sig": "SIGSEGV",
+            "severity": "critical",
+        }]
+        issue["held"] = {
+            "owner": "firefox-esr", "mass_hold": True, "held_total": 41874,
+            "held_installed": 31, "outdated": [], "relevant": [],
+        }
+        verdict = raise_ticket.assess(
+            conn, {"issue_key": "ff", "vendor": "mozilla"}, issue
+        )
+        self.assertTrue(verdict["viable"], verdict)
+        self.assertFalse(verdict["hold_explained"])
+
+        issue["held"] = dict(issue["held"], owner=None)
+        verdict = raise_ticket.assess(
+            conn, {"issue_key": "ff", "vendor": "mozilla"}, issue
+        )
+        self.assertFalse(verdict["viable"])
+        self.assertTrue(verdict["hold_explained"])
+
     def test_held_outdated_crash_is_filed_under_rejected(self):
         import json
         import pathlib
@@ -2400,6 +2489,37 @@ class NotificationTraceCrosscheckTests(unittest.TestCase):
         with mock.patch.object(crosscheck.report, "append_journal"):
             result = crosscheck.run(conn, days=30, notify_drift=False)
         self.assertTrue(result["unraised_issues"])
+
+    def test_crosscheck_counts_a_staged_ticket_as_drafted(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, crosscheck, tickets
+
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO events(ts,boot_id,source,severity,unit,pid,comm,message,"
+            "fingerprint,raw,count,last_ts) VALUES(datetime('now'),'b','journal',"
+            "'critical','kernel',1,'k','NVRM: Xid (PCI:0000:01:00): 79','fp-staged','{}',3,"
+            "datetime('now'))"
+        )
+        issues = tickets.collect_issues(conn, days=30)
+        key = next(i["key"] for i in issues if i["kind"] == "event")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            evidence = root / "nvidia-x-abc" / "evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "manifest.json").write_text(
+                json.dumps({"issue_key": key}), encoding="utf-8"
+            )
+            with mock.patch.object(config, "RAISE_DIR", root), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"), \
+                 mock.patch.object(crosscheck.report, "append_journal"):
+                result = crosscheck.run(conn, days=30, notify_drift=False)
+        self.assertNotIn(key, result["unraised_issues"])
+        self.assertEqual(result["drift"], 0)
 
     def test_crosscheck_does_not_count_capped_issues_as_drift(self):
         from unittest import mock

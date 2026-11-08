@@ -478,7 +478,11 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         hold = issue.get("held")
         if hold is None:
             hold = held_context(issue)
-        if hold.get("relevant") or hold.get("mass_hold"):
+        # A global hold is only explanatory when the crashed executable has no
+        # known owner. For an owned executable, show only its held family.
+        if hold.get("relevant") or (
+            hold.get("mass_hold") and not hold.get("owner")
+        ):
             lines += ["## Held packages", ""]
             if hold.get("mass_hold"):
                 lines.append(

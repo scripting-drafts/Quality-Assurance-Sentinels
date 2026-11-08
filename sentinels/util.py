@@ -73,6 +73,7 @@ _USER = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b")
 _UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+_CRASH_ID_RE = re.compile(r"\bbp-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _SERIAL_RE = re.compile(r"(?i)\b(serial(?:\s*(?:number|no\.?))?\s*[:=]\s*)\S+")
 
@@ -91,11 +92,23 @@ def redact(text: str) -> str:
         text = text.replace(_HOSTNAME, "<host>")
     text = _EMAIL_RE.sub("<email>", text)
     text = _MAC_RE.sub("<mac>", text)
+    # A submitted Mozilla crash ID is a public report locator, not operator
+    # identity. Preserve it so the ticket can be matched to the report; all
+    # other UUIDs are still removed.
+    crash_ids: list[str] = []
+
+    def _hold_crash_id(match: re.Match) -> str:
+        crash_ids.append(match.group(0))
+        return f"\x00crashid{len(crash_ids) - 1}\x00"
+
+    text = _CRASH_ID_RE.sub(_hold_crash_id, text)
     text = _UUID_RE.sub("<uuid>", text)
     text = _IPV4_RE.sub("<ip>", text)
     text = _SERIAL_RE.sub(r"\1<serial>", text)
     if _USER and len(_USER) > 2:
         text = re.sub(rf"\b{re.escape(_USER)}\b", "<user>", text)
+    for index, crash_id in enumerate(crash_ids):
+        text = text.replace(f"\x00crashid{index}\x00", crash_id)
     return text
 
 

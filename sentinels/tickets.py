@@ -560,7 +560,6 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
             lines.append(f"- LinkedIn: {identity['LINKEDIN']}")
         if identity.get("GITHUB"):
             lines.append(f"- GitHub: {identity['GITHUB']}")
-        lines.append("- Consent: identity release approved in `config/identity.env` (TICKET_CONSENT=1).")
     else:
         lines.append(
             "- Identity withheld. Set `TICKET_CONSENT=1` plus FULL_NAME/LINKEDIN/GITHUB "

@@ -9,18 +9,19 @@ import os
 import re
 from datetime import timedelta
 
-from . import classify, config, correlate, db, holds
+from . import classify, config, core2, correlate, db, holds
 from .util import (
     human_bytes, identity_for_ticket, iso, read_text, redact, run, sha256_text, utcnow,
 )
 
 
-def _environment() -> list[str]:
+def _environment(topology: dict | None = None) -> list[str]:
     os_release = {}
     for line in read_text("/etc/os-release").splitlines():
         if "=" in line:
             k, v = line.split("=", 1)
             os_release[k] = v.strip('"')
+    topo = topology or core2.topology()
     cpu = ""
     for line in read_text("/proc/cpuinfo").splitlines():
         if line.lower().startswith("model name"):
@@ -41,8 +42,8 @@ def _environment() -> list[str]:
     lines = [
         f"- OS: {os_release.get('PRETTY_NAME', 'Linux')}",
         f"- Kernel: {read_text('/proc/sys/kernel/osrelease')}",
-        f"- CPU: {cpu or 'unknown'} ({os.cpu_count()} logical CPUs)",
-        f"- Physical core 2 logical siblings: {', '.join(map(str, config.CORE2_CPUS))}",
+        f"- CPU: {cpu or 'unknown'} ({topo.get('logical_cpus') or os.cpu_count()} logical CPUs)",
+        f"- Physical core 2: {core2.presence(topo)}",
         f"- Memory: {human_bytes(mem_kb)}",
     ]
     if gpu:
@@ -58,21 +59,48 @@ def _environment() -> list[str]:
     return lines
 
 
-def _repro_block(vendor: str) -> list[str]:
+def _repro_block(vendor: str, topology: dict | None = None) -> list[str]:
+    topo = topology or core2.topology()
+    present = topo.get("present") is True
+    siblings = ",".join(map(str, topo.get("logical") or [])) or "2,8"
     if vendor == "mozilla":
+        if present:
+            pin = (
+                "2. Pin the browser to the SMT siblings of physical core 2: "
+                f"`taskset -c {siblings} firefox-esr --no-remote --new-instance`."
+            )
+            control = "4. Control run: same steps pinned to another physical core (e.g. `taskset -c 0,6`)."
+        else:
+            pin = (
+                "2. Physical core 2 is "
+                f"{core2.presence(topo)}; pin the browser to an available core "
+                "(e.g. `taskset -c 0`) and record that core-2 comparison was not possible."
+            )
+            control = "4. Use the same available-core run as the control; state the core-2 absence in the report."
         return [
             "1. Use a fresh Firefox profile (never a logged-in profile).",
-            "2. Pin the browser to the SMT siblings of physical core 2: "
-            f"`taskset -c {','.join(map(str, config.CORE2_CPUS))} firefox-esr --no-remote --new-instance`.",
+            pin,
             "3. Load the page that triggered WebRender/compositor work until the tab or GPU process crashes.",
-            "4. Control run: same steps pinned to another physical core (e.g. `taskset -c 0,6`).",
+            control,
             "5. Compare `about:crashes` minidumps and the sentinel crash table.",
         ]
     if vendor == "canonical-kernel":
+        if present:
+            core_test = (
+                f"2. Run the core-2 live test from a disposable live USB: "
+                f"`~/core2/verify-core2-live.sh` (logical CPUs {siblings})."
+            )
+            compare = "3. Compare suspect against a control core for equal duration."
+        else:
+            core_test = (
+                "2. Physical core 2 is "
+                f"{core2.presence(topo)}; run the workload on available cores and record the absence."
+            )
+            compare = "3. Use one available core as the control; do not claim a core-2 comparison."
         return [
             "1. Reproduce the workload on the installed system; keep the sentinel running.",
-            "2. Run the core-2 live test from a disposable live USB: `~/core2/verify-core2-live.sh`.",
-            "3. Compare suspect (`2,8`) against control (`0,6`) for equal duration.",
+            core_test,
+            compare,
             "4. Capture `journalctl -k -b -1`, `coredumpctl info`, and the latest evidence bundle.",
         ]
     if vendor == "nvidia":
@@ -82,9 +110,20 @@ def _repro_block(vendor: str) -> list[str]:
             "3. Compare with the open-source driver if available.",
         ]
     if vendor == "hardware":
+        if present:
+            stress = (
+                f"2. From a disposable live USB, stress physical core 2 "
+                f"(`{siblings}`) and a control core (`0,6`)."
+            )
+        else:
+            stress = (
+                "2. Physical core 2 is "
+                f"{core2.presence(topo)}; stress the available cores and record the absence "
+                "instead of claiming a core-2 comparison."
+            )
         return [
             "1. The sentinel records per-core affinity and crash correlation continuously.",
-            f"2. From a disposable live USB, stress physical core 2 (`2,8`) and a control core (`0,6`).",
+            stress,
             "3. Capture MCE/EDAC/thermal data and the evidence bundle.",
             "4. Replace or re-seat the CPU only after the vendor confirms the diagnosis.",
         ]
@@ -265,7 +304,18 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
     return result
 
 
-def _core2_table(rows: list[dict]) -> list[str]:
+def _mentions_core2(issue: dict) -> bool:
+    text = f"{issue.get('signature') or ''} {issue.get('display') or ''}".lower()
+    if "core 2" in text or "core-2" in text:
+        return True
+    if issue.get("kind") == "correlation":
+        return True
+    if issue.get("vendor") in ("mozilla", "canonical-kernel", "hardware"):
+        return True
+    return any(row.get("core2_involved") is not None for row in issue.get("rows") or [])
+
+
+def _core2_table(rows: list[dict], topology: dict | None = None) -> list[str]:
     crashed = [r for r in rows if "sig" in r]
     if not crashed:
         return ["No crash rows in this cluster."]
@@ -285,13 +335,27 @@ def _core2_table(rows: list[dict]) -> list[str]:
         "Unknown affinity is labelled unknown, not discarded. This correlation is part "
         "of the QA record and is included in every ticket.",
     ]
+    topo = topology or core2.topology()
+    if topo.get("present") is False:
+        lines.append(
+            "Current host topology does not expose physical core 2; any `yes` rows "
+            "are historical or from a different topology."
+        )
+    elif topo.get("present") is None:
+        lines.append(
+            "Current host topology is unavailable; verdicts are taken from the recorded "
+            "affinity masks, not from a fresh CPU census."
+        )
     return lines
 
 
 def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> tuple[str, str]:
     meta = classify.VENDOR_META.get(issue["vendor"], classify.VENDOR_META["local"])
+    topo = core2.topology()
     shown = issue.get("display") or issue["signature"]
     title = f"[QA] {meta['component']}: {shown[:120]}"
+    if _mentions_core2(issue):
+        title = f"{title} [{core2.theme_tag(topo)}]"
     rows = issue["rows"]
     example = ""
     if rows:
@@ -301,7 +365,7 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         f"# {title}",
         "",
         "> **DRAFT ONLY — NOT SUBMITTED.** Review, attach the evidence bundle, then post",
-        f"> through {meta['channel']}. Remove nothing from the core-2 evidence section.",
+        f"> through {meta['channel']}. Remove nothing from the physical-core evidence section.",
         "",
         f"- Vendor / channel: **{meta['name']}** — {meta['channel']}",
         f"- Cluster key: `{issue['key']}`",
@@ -309,7 +373,7 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         "",
         "## Environment",
         "",
-        *_environment(),
+        *_environment(topo),
         "",
     ]
     if issue.get("kind") == "crash":
@@ -345,13 +409,13 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
     if issue.get("notes"):
         lines += ["## Consistency", "", issue["notes"], ""]
     lines += [
-        "## Physical core 2 correlation (required, do not omit)",
+        f"## Physical core 2 correlation — {core2.presence(topo)}",
         "",
-        *_core2_table(rows),
+        *_core2_table(rows, topo),
         "",
         "## Reproduction",
         "",
-        *_repro_block(issue["vendor"]),
+        *_repro_block(issue["vendor"], topo),
         "",
         "## Evidence",
         "",

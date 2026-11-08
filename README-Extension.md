@@ -8,7 +8,7 @@ All commands use `./bin/qa <command>` from the repository root.
 | --- | --- | --- |
 | Setup and operations | `install.sh`, `uninstall.sh`, `init`, `compat`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, check Ubuntu upgrade compatibility, inspect prerequisites, check scheduling and security posture |
 | Routine collection | `cycle` (`tick`, `layer1`; `phase1` legacy), `sample`, `ingest`, `inventory`, `report` | Capture system state and run every due layer-1 duty |
-| Failure investigation | `boots`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, events, their relationships, and held/outdated packages |
+| Failure investigation | `boots`, `shutdown`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, boot and shutdown-window errors, events, their relationships, and held/outdated packages |
 | Hardware health | `hardware` | Collect RAS/EDAC/AER/APEI, SMART/NVMe, GPU, BMC, sensors, turbostat/PCM/uncore, vendor logs |
 | Linux Security Modules | `lsm` | Monitor AppArmor, SELinux, Smack, TOMOYO, Yama, lockdown, IMA, BPF, drift and denials |
 | Security provenance | `security` | Detect unexpected user/root code execution, root-owned state, and audit coverage gaps |
@@ -37,7 +37,7 @@ Run `./bin/qa --help` for the full command list and `./bin/qa <command> --help` 
 
 | Path | Contents |
 | --- | --- |
-| `var/` | SQLite database and application state |
+| `var/` | SQLite database, application state, and shutdown-window captures |
 | `journal/` | Local monitoring records and generated reports |
 | `evidence/` | Evidence bundles and verification metadata |
 | `tickets/drafts/` | Candidate vendor report drafts |

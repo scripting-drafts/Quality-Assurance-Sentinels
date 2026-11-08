@@ -57,6 +57,7 @@ UNIT_FILES=(
   /etc/systemd/system/qa-sentinel-deep.service
   /etc/systemd/system/qa-sentinel-deep.path
   /etc/systemd/system/qa-pstore-export.service
+  /etc/systemd/system/qa-shutdown-capture.service
   /etc/systemd/system/qa-hardware.service
   /etc/systemd/system/qa-hardware.timer
   /etc/systemd/system/qa-lsm-read.service

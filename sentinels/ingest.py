@@ -8,7 +8,7 @@ import re
 import shutil
 from datetime import datetime, timedelta, timezone
 
-from . import classify, config, db
+from . import classify, config, db, shutdown
 from .util import iso, parse_iso, run, sha256_text, utcnow
 
 
@@ -274,11 +274,15 @@ def ingest_minidumps(conn) -> int:
 
 
 def ingest_all(conn) -> dict:
-    result = {"journal": 0, "coredumps": 0, "minidumps": 0}
+    result = {"journal": 0, "shutdown": 0, "coredumps": 0, "minidumps": 0}
     try:
         result["journal"] = ingest_journal(conn)
     except Exception as exc:  # noqa: BLE001 - one source must not stop the others
         result["journal_error"] = str(exc)[:300]
+    try:
+        result["shutdown"] = shutdown.replay(conn)
+    except Exception as exc:  # noqa: BLE001
+        result["shutdown_error"] = str(exc)[:300]
     try:
         result["coredumps"] = ingest_coredumps(conn)
     except Exception as exc:  # noqa: BLE001

@@ -28,6 +28,15 @@ PSTORE_EXPORT_DIR = pathlib.Path(
 
 JOURNAL_DIR = ROOT / "journal"
 REPORT_DIR = JOURNAL_DIR / "reports"
+SHUTDOWN_DIR = pathlib.Path(
+    os.environ.get("QA_SHUTDOWN_DIR", str(VAR / "shutdown"))
+)
+CAPTURE_REDACTION = os.environ.get("QA_CAPTURE_REDACTION", "strict").strip().lower()
+if CAPTURE_REDACTION not in ("strict", "collapsed", "metadata"):
+    CAPTURE_REDACTION = "strict"
+CAPTURE_BOOT = os.environ.get("QA_CAPTURE_BOOT", "1").lower() in (
+    "1", "yes", "true", "on",
+)
 EVIDENCE_DIR = ROOT / "evidence"
 TICKET_DIR = ROOT / "tickets"
 DRAFT_DIR = TICKET_DIR / "drafts"
@@ -134,6 +143,9 @@ if JOURNAL_PRIORITY not in ("emerg", "alert", "crit", "err", "warning", "notice"
 
 # retention
 EVENT_RETENTION_DAYS = int(os.environ.get("QA_EVENT_RETENTION_DAYS", "30"))
+SHUTDOWN_RETENTION_DAYS = int(
+    os.environ.get("QA_SHUTDOWN_RETENTION_DAYS", str(EVENT_RETENTION_DAYS))
+)
 SAMPLE_RETENTION_DAYS = int(os.environ.get("QA_SAMPLE_RETENTION_DAYS", "7"))
 PROC_RETENTION_DAYS = int(os.environ.get("QA_PROC_RETENTION_DAYS", "3"))
 INVENTORY_RETENTION_DAYS = int(os.environ.get("QA_INVENTORY_RETENTION_DAYS", "90"))
@@ -160,7 +172,7 @@ def ensure_dirs() -> None:
     for d in (
         VAR, JOURNAL_DIR, REPORT_DIR, EVIDENCE_DIR, TICKET_DIR, DRAFT_DIR,
         TRIAGE_DIR.parent, TRIAGE_DIR, DEEP_DIR, DEEP_REQUEST_DIR, DEEP_ARCHIVE_DIR, CONFIG_DIR,
-        RAISE_DIR, STANDBY_DIR, REJECT_DIR, PSTORE_EXPORT_DIR,
+        RAISE_DIR, STANDBY_DIR, REJECT_DIR, PSTORE_EXPORT_DIR, SHUTDOWN_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
         _secure(d, 0o700)
@@ -174,6 +186,8 @@ def ensure_dirs() -> None:
         if path.exists():
             _secure(path, 0o600)
     for path in PSTORE_EXPORT_DIR.glob("*/summary.txt"):
+        _secure(path, 0o600)
+    for path in SHUTDOWN_DIR.glob("*.json"):
         _secure(path, 0o600)
     chain = EVIDENCE_DIR / "chain.log"
     if chain.exists():

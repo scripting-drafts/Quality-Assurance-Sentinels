@@ -11,6 +11,15 @@ environment variable read by `bin/qa`.
   before the cap so one-off warnings cannot crowd out high-volume faults.
   Set `0` for no limit.
 - `QA_EVIDENCE_EVENT_LIMIT=0` — put every event in an evidence bundle.
+- `QA_SHUTDOWN_DIR=var/shutdown` — where the shutdown listener writes its
+  capture records.
+- `QA_SHUTDOWN_RETENTION_DAYS=30` — capture retention; defaults to the event
+  retention period.
+- `QA_CAPTURE_REDACTION=strict` — capture redaction profile: `strict`
+  (default, preserves path shape), `collapsed` (replaces paths/URLs), or
+  `metadata` (withholds message text).
+- `QA_CAPTURE_BOOT=1` — include boot-phase failures in the shutdown capture;
+  set `0` for shutdown-phase only.
 - `QA_INVENTORY_INTERVAL_S=10800` — base inventory period.
 - `QA_INVENTORY_MIN_S=900`, `QA_INVENTORY_MAX_S=43200` — adaptive floor/ceiling.
 - `QA_DEEP_AUTO=1` — queue layer-2 tracing for critical layer-1 findings.

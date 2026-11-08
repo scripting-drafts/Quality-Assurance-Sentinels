@@ -125,6 +125,10 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now qa-sentinel.timer
+if [[ -x "$ROOT/root/install-shutdown.sh" ]]; then
+  "$ROOT/root/install-shutdown.sh" --redaction "${QA_CAPTURE_REDACTION:-strict}" || \
+    echo "warning: shutdown listener was not installed; run sudo $ROOT/root/install-shutdown.sh --redaction ${QA_CAPTURE_REDACTION:-strict}" >&2
+fi
 fi
 
 cat >"$DEEP_SERVICE" <<EOF

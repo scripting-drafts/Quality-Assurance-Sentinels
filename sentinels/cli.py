@@ -15,7 +15,7 @@ from datetime import datetime
 from . import (
     boot, compat, config, correlate, crosscheck, db, deep, detect, evidence, hardware,
     holds, ingest, inventory, logs, lsm, notify, posture, raise_ticket, report, sampler,
-    security, siem, tickets, trace, triage,
+    security, shutdown, siem, tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
 
@@ -406,6 +406,69 @@ def cmd_boots(args) -> int:
     return 0
 
 
+def _print_shutdown(record: dict) -> None:
+    boot_id = (record.get("boot_id") or "")[:8] or "unknown"
+    phases = record.get("phases") or {}
+    if phases:
+        boot_count = int((phases.get("boot") or {}).get("count") or 0)
+        stop = phases.get("shutdown") or {}
+        stop_count = int(stop.get("count") or 0)
+        detail = f"{boot_count} boot-phase, {stop_count} shutdown-phase occurrence(s)"
+        if stop.get("start"):
+            detail += f"; shutdown window {stop['start']} → {stop.get('end') or '?'}"
+    else:
+        detail = f"{int(record.get('count') or 0)} shutdown error(s)"
+    mode = record.get("redaction") or config.CAPTURE_REDACTION
+    print(f"boot {boot_id}: {detail}; redaction={mode}")
+    for item in (record.get("errors") or [])[:50]:
+        phase = item.get("phase") or "shutdown"
+        count = int(item.get("count") or 1)
+        message = str(item.get("message") or "").strip()
+        if not message:
+            message = "(message withheld)"
+        suffix = f" (x{count})" if count > 1 else ""
+        print(
+            f"  [{phase:<8}] {item.get('ts', '')} "
+            f"{str(item.get('severity') or ''):<7} "
+            f"{item.get('unit') or 'systemd'}: {message[:180]}{suffix}"
+        )
+
+
+def cmd_shutdown(args) -> int:
+    config.ensure_dirs()
+    if args.redaction and (args.capture or args.scan):
+        config.CAPTURE_REDACTION = args.redaction
+    if args.capture:
+        record = shutdown.capture("0")
+        if args.quiet:
+            phases = record.get("phases") or {}
+            print(
+                f"captured {int((phases.get('boot') or {}).get('count') or 0)} boot + "
+                f"{int((phases.get('shutdown') or {}).get('count') or 0)} shutdown "
+                f"error(s) for boot {(record.get('boot_id') or '')[:8]}"
+            )
+        else:
+            _print_shutdown(record)
+        return 0
+    if args.scan:
+        _print_shutdown(shutdown.scan_boot(args.boot, refresh=True))
+        return 0
+    if args.replay:
+        with db.session() as conn:
+            added = shutdown.replay(conn)
+        print(f"replayed {added} shutdown event(s)")
+        return 0
+
+    rows = shutdown.records(limit=args.limit)
+    if not rows:
+        print("no shutdown captures recorded yet")
+        print("capture the current boot with: bin/qa shutdown --capture")
+        return 0
+    for record in rows:
+        _print_shutdown(record)
+    return 0
+
+
 def cmd_correlate(args) -> int:
     with db.session() as conn:
         summary = correlate.correlate(conn, days=args.days, notify=not args.quiet)
@@ -620,6 +683,23 @@ def cmd_status(args) -> int:
             " COALESCE(SUM(CASE WHEN ended_clean=0 THEN 1 ELSE 0 END),0) u FROM boots"
         ).fetchone()
         print(f"  boots         : {bcounts['n']} recorded, {bcounts['u']} unclean")
+        captures = shutdown.records(limit=1)
+        if captures:
+            latest = captures[0]
+            phases = latest.get("phases") or {}
+            if phases:
+                counts = (
+                    f"{int((phases.get('boot') or {}).get('count') or 0)} boot + "
+                    f"{int((phases.get('shutdown') or {}).get('count') or 0)} shutdown"
+                )
+            else:
+                counts = str(int(latest.get("count") or 0))
+            print(
+                f"  shutdown      : {counts} error(s) in latest capture "
+                f"({str(latest.get('boot_id') or '')[:8]})"
+            )
+        else:
+            print("  shutdown      : no captures yet (systemd: qa-shutdown-capture.service)")
         ccounts = conn.execute("SELECT COUNT(*) AS n FROM correlations").fetchone()
         ready_clusters = sum(1 for c in correlate.aggregate(conn) if c["ready"])
         print(f"  correlate     : {ccounts['n']} cluster rows, {ready_clusters} ticket-ready")
@@ -1321,6 +1401,35 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--detail", help="show one recorded boot by id prefix")
     s.add_argument("--refresh", action="store_true", help="re-scan boots already recorded")
     s.set_defaults(func=cmd_boots)
+
+    s = sub.add_parser(
+        "shutdown", help="track service start and unmount failures from boot and shutdown"
+    )
+    group = s.add_mutually_exclusive_group()
+    group.add_argument(
+        "--capture", action="store_true",
+        help="scan and persist the current boot's failures (systemd final.target)",
+    )
+    group.add_argument(
+        "--scan", action="store_true",
+        help="scan one boot journal without writing a capture",
+    )
+    group.add_argument(
+        "--replay", action="store_true",
+        help="insert stored shutdown errors into the events table now",
+    )
+    group.add_argument(
+        "--list", action="store_true", help="list stored shutdown captures (default)",
+    )
+    s.add_argument("--boot", default="-1", help="boot reference for --scan (default: -1)")
+    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("--quiet", action="store_true",
+                   help="with --capture, print only the phase summary")
+    s.add_argument(
+        "--redaction", choices=("strict", "collapsed", "metadata"),
+        help="override QA_CAPTURE_REDACTION for --capture/--scan",
+    )
+    s.set_defaults(func=cmd_shutdown)
 
     s = sub.add_parser(
         "correlate", help="pair silent stops with the component errors that preceded them"

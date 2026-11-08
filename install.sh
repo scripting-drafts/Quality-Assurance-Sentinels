@@ -85,6 +85,12 @@ audit_install() {
     echo "  pstore  : no export unit (manual: sudo root/pstore-export.sh --refresh)"
   fi
 
+  if [[ -e /etc/systemd/system/qa-shutdown-capture.service ]]; then
+    echo "  shutdown: qa-shutdown-capture.service installed"
+  else
+    echo "  shutdown: no capture unit (install: sudo root/install-shutdown.sh)"
+  fi
+
   echo
   echo "layer 2"
   ./bin/qa deploy-layer2 --check 2>&1 | sed 's/^/  /' || true
@@ -217,9 +223,9 @@ fi
 # ---------------------------------------------------------------- plan
 if [[ $LAYER1 -eq 1 ]]; then
   if [[ "$SCHEDULE" == "systemd" ]]; then
-    layer1_plan="build sampler, init store, first cycle, systemd timer, pstore export unit"
+    layer1_plan="build sampler, init store, first cycle, systemd timer, pstore export unit, shutdown listener"
   else
-    layer1_plan="build sampler, init store, first cycle, user cron, pstore export unit"
+    layer1_plan="build sampler, init store, first cycle, user cron, pstore export unit, shutdown listener"
   fi
 else
   layer1_plan="skipped"
@@ -294,6 +300,27 @@ install_pstore_unit() {
   fi
 }
 
+install_shutdown_unit() {
+  local script="$ROOT/root/install-shutdown.sh"
+  local redaction="${QA_CAPTURE_REDACTION:-strict}"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "   ! systemctl missing; shutdown listener not installed" >&2
+    return 0
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "   $ sudo $script --redaction $redaction"
+    return 0
+  fi
+  if [[ ${EUID} -eq 0 ]]; then
+    "$script" --redaction "$redaction"
+  elif command -v sudo >/dev/null 2>&1 && { sudo -n true 2>/dev/null || [[ -t 0 ]]; }; then
+    sudo "$script" --redaction "$redaction"
+  else
+    echo "   ! shutdown listener not installed (sudo required)" >&2
+    echo "     rerun with sudo or run: sudo $script --redaction $redaction" >&2
+  fi
+}
+
 # ---------------------------------------------------------------- layer 1
 if [[ $LAYER1 -eq 1 ]]; then
   echo "== layer 1: collection"
@@ -346,6 +373,10 @@ fi
 if [[ $LAYER1 -eq 1 ]]; then
   echo "== pstore: root export unit"
   install_pstore_unit
+  if [[ "$SCHEDULE" != "systemd" ]]; then
+    echo "== shutdown: error listener"
+    install_shutdown_unit
+  fi
 fi
 
 echo

@@ -19,7 +19,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from . import config
+from . import config, shutdown
 from .util import iso, parse_iso, read_text, redact, run
 
 SHUTDOWN_RE = re.compile(r"systemd-shutdown\[\d+\]:")
@@ -292,7 +292,7 @@ def _crash_capture_state(archives: list[dict] | None = None) -> dict:
 
 
 # ---------------------------------------------------------------- one boot
-def scan_boot(boot: dict) -> dict:
+def scan_boot(boot: dict, refresh: bool = False) -> dict:
     boot_id = boot["boot_id"]
     tail = _journal(boot_id, n=300)
     wide = _scan_output(boot_id)
@@ -306,6 +306,35 @@ def scan_boot(boot: dict) -> dict:
         regex = re.compile(pattern)
         hits = [ln for ln in wide.splitlines() if regex.search(ln)]
         scans[key] = {"label": label, "count": len(hits), "sample": hits[:3]}
+
+    # The shutdown listener is the only source for errors written after the
+    # last routine cycle.  Reconstruct the window for the latest completed
+    # boot; older boots keep a capture record when one exists instead of
+    # paying for another journal scan.
+    try:
+        sd = shutdown.scan_boot(
+            boot_id, boot_id=boot_id, refresh=refresh,
+            journal=boot.get("index") == -1,
+        )
+    except Exception:  # noqa: BLE001 - a boot verdict must not depend on this
+        sd = {"count": 0, "errors": [], "phases": {}, "window_start": ""}
+    phase_summary = sd.get("phases") or {}
+    for phase, key, label in (
+        ("boot", "startup", "startup errors"),
+        ("shutdown", "shutdown", "shutdown errors"),
+    ):
+        items = [
+            e for e in sd.get("errors", [])
+            if (e.get("phase") or "shutdown") == phase
+        ]
+        summary = phase_summary.get(phase) or {}
+        scans[key] = {
+            "label": label,
+            "count": int(summary.get("count") or len(items)),
+            "sample": [str(e.get("message") or "")[:300] for e in items[:3]],
+        }
+        if summary.get("start"):
+            scans[key]["window_start"] = summary["start"]
 
     pstore_scan = _pstore_scan(archives)
     if pstore_scan:
@@ -371,13 +400,25 @@ def collect(conn, limit: int = 8, refresh: bool = False) -> dict:
     ``refresh`` re-scans boots already stored, which matters when the scanner
     itself improves: a verdict is only as good as the evidence it read.
     """
-    seen = {r["boot_id"] for r in conn.execute("SELECT boot_id FROM boots")}
+    seen = {
+        r["boot_id"]: r["scans"]
+        for r in conn.execute("SELECT boot_id, scans FROM boots")
+    }
     new, updated = [], []
     for boot in _list_boots(limit):
         exists = boot["boot_id"] in seen
         if exists and not refresh:
-            continue
-        record = scan_boot(boot)
+            # Backfill the newest completed boot once so an existing install
+            # gains the shutdown evidence without waiting for another reboot.
+            if boot["index"] != -1:
+                continue
+            try:
+                scans = json.loads(seen[boot["boot_id"]] or "{}")
+                if "startup" in scans and "shutdown" in scans:
+                    continue
+            except json.JSONDecodeError:
+                pass
+        record = scan_boot(boot, refresh=refresh)
         values = (
             record["seq"], record["span"], record["last_ts"], record["ended_clean"],
             record["markers"], record["last_message"], record["scans"],

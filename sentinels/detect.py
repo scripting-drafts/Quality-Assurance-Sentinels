@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from . import boot, config, db, holds, triage
+from . import boot, classify, config, db, holds, triage
 from .util import iso, parse_iso, sha256_text, utcnow
 
 # journal rules, highest severity first
@@ -23,6 +23,17 @@ EVENT_RULES = [
     ("gpu.xid", "critical", re.compile(r"(?i)\bXid\b|GPU has fallen off the bus")),
     ("nvrm.error", "error",
      re.compile(r"(?i)NVRM: .*(?:error|fatal|assert|video memory|out of memory)")),
+    # Service start and unmount failures are ordinary error-priority journal
+    # messages.  They are the shutdown listener's main payload, but the same
+    # rule also tracks a start failure that happens during normal boot.
+    ("systemd.service_start", "error",
+     re.compile(r"(?i)\bFailed to start\b")),
+    ("systemd.unmount", "error",
+     re.compile(r"(?i)\bFailed (?:unmounting|to unmount)\b")),
+    ("systemd.unit_stop", "error",
+     re.compile(r"(?i)\bFailed to stop\b")),
+    ("systemd.shutdown", "error",
+     re.compile(r"(?i)\bFailed to (?:finalize|kill|send|wait|enqueue|isolate|switch)\b")),
 ]
 
 
@@ -31,6 +42,13 @@ SELF_NOISE = re.compile(
     r"sudo:auth|auth could not identify password|"
     r"a password is required\s*;|COMMAND=/usr/bin/true"
 )
+
+# Recurring service and mount failures are one issue, not one finding per
+# five-minute journal bucket.  Group them by stable signature.
+GROUPED_EVENT_RULES = {
+    "systemd.service_start", "systemd.unmount", "systemd.unit_stop",
+    "systemd.shutdown",
+}
 
 
 def _case_id(conn, subject: str, signature: str | None = None) -> int | None:
@@ -115,6 +133,7 @@ def _crash_findings(conn, since: str) -> list[dict]:
 
 def _event_findings(conn, since: str) -> list[dict]:
     out = []
+    grouped: dict[tuple[str, str], dict] = {}
     for row in conn.execute(
         "SELECT * FROM events WHERE ts>=? AND severity IN ('critical','error')"
         " ORDER BY ts DESC LIMIT 5000",
@@ -133,6 +152,31 @@ def _event_findings(conn, since: str) -> list[dict]:
                 continue
             rule, severity = "journal.critical", "warning"
         unit = (row["unit"] or "").split(".")[0]
+        if rule in GROUPED_EVENT_RULES:
+            signature = classify.signature(msg, 200)
+            key = (rule, signature)
+            item = grouped.get(key)
+            if item is None:
+                grouped[key] = {
+                    "fingerprint": f"event|{rule}|{sha256_text(signature)[:32]}",
+                    "ts": row["ts"],
+                    "last_ts": row["last_ts"] or row["ts"],
+                    "rule": rule,
+                    "severity": severity,
+                    "subject": unit or "kernel",
+                    "detail": msg[:1500],
+                    "count": int(row["count"] or 1),
+                    "case_id": _case_id(conn, unit, msg),
+                }
+            else:
+                item["ts"] = min(item["ts"], row["ts"])
+                item["last_ts"] = max(
+                    item["last_ts"], row["last_ts"] or row["ts"]
+                )
+                item["count"] += int(row["count"] or 1)
+                item["detail"] = msg[:1500]
+                item["subject"] = unit or item["subject"]
+            continue
         out.append(
             {
                 "fingerprint": f"event|{rule}|{row['fingerprint']}",
@@ -145,6 +189,12 @@ def _event_findings(conn, since: str) -> list[dict]:
                 "case_id": _case_id(conn, unit, msg),
             }
         )
+    for item in grouped.values():
+        item["detail"] = (
+            f"{item['detail']} ({item['count']} occurrence(s) in window)"
+        )[:1500]
+        item.pop("count", None)
+        out.append(item)
     return out
 
 
@@ -211,6 +261,13 @@ def scan(conn, hours: int = 24) -> list[dict]:
         if last
         else (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     )
+    # New rule sets must see the events that predate their deployment.  The
+    # one-time backfill also updates existing findings instead of duplicating
+    # them, because every rule fingerprints by its own evidence.
+    backfill = not db.meta_get(conn, "event_rules_backfill_v1")
+    if backfill:
+        window = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        since = min(since, window)
     candidates = (
         _crash_findings(conn, since)
         + _event_findings(conn, since)
@@ -223,6 +280,8 @@ def scan(conn, hours: int = 24) -> list[dict]:
         if created:
             new.append(created)
     db.meta_set(conn, "last_finding_scan", iso(now))
+    if backfill:
+        db.meta_set(conn, "event_rules_backfill_v1", iso(now))
     return new
 
 

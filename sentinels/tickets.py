@@ -9,19 +9,104 @@ import os
 import re
 from datetime import timedelta
 
-from . import classify, config, core2, correlate, db, holds
+from . import classify, config, core2, correlate, db, holds, packages
 from .util import (
     human_bytes, identity_for_ticket, iso, read_text, redact, run, sha256_text, utcnow,
 )
 
 
-def _environment(topology: dict | None = None) -> list[str]:
+def _software_versions(issue: dict | None = None) -> list[dict]:
+    """Installed packages relevant to a ticket, newest source of truth first."""
+    issue = issue or {}
+    found: dict[str, str] = {}
+    if issue.get("vendor") != "hardware":
+        seen: set[str] = set()
+        for row in issue.get("rows") or []:
+            exe = str(row.get("exe") or "")
+            if not exe.startswith("/") or exe in seen:
+                continue
+            seen.add(exe)
+            try:
+                owner = packages.owner(exe)
+            except Exception:  # noqa: BLE001 - package state is advisory
+                owner = {}
+            name = owner.get("package")
+            version = owner.get("version")
+            if name and version:
+                found[str(name)] = str(version)
+            if len(found) >= 5:
+                break
+    if not found:
+        installed = dict(packages.installed())
+        candidates: list[str] = []
+        vendor = issue.get("vendor")
+        if vendor == "mozilla":
+            candidates = ["firefox-esr", "firefox"]
+        elif vendor == "canonical-kernel":
+            release = read_text("/proc/sys/kernel/osrelease")
+            candidates = [f"linux-image-{release}", "linux-image-generic"]
+        elif vendor == "systemd":
+            candidates = ["systemd"]
+        elif vendor == "nvidia":
+            candidates = ["nvidia-settings"]
+        for name in candidates:
+            if name in installed:
+                found[name] = installed[name]
+                break
+    return [
+        {"package": name, "version": version}
+        for name, version in sorted(found.items())
+    ]
+
+
+_VERSION_LINE_RE = re.compile(r"(?im)^\s*Version:\s*(.+?)\s*$")
+
+
+def _context_versions(issue: dict) -> list[str]:
+    if issue.get("kind") != "crash":
+        return []
+    versions: list[str] = []
+    for row in issue.get("rows") or []:
+        for match in _VERSION_LINE_RE.finditer(row.get("context") or ""):
+            value = match.group(1).strip()
+            if value and value not in versions:
+                versions.append(value)
+    return versions
+
+
+def _version_tag(issue: dict, software: list[dict]) -> str:
+    if issue.get("kind") != "crash" or not software:
+        return ""
+    shown = ", ".join(
+        f"{item['package']} {item['version']}" for item in software[:2]
+    )
+    return f"[{shown}]" if shown else ""
+
+
+def _version_note(issue: dict, software: list[dict]) -> str:
+    contexts = _context_versions(issue)
+    if not contexts or not software:
+        return ""
+    if any(item["version"] in context for item in software for context in contexts):
+        return ""
+    installed = ", ".join(f"`{item['package']}` {item['version']}" for item in software)
+    shown = "; ".join(f"`{value}`" for value in contexts[:3])
+    return (
+        f"> **Version note:** the crash-time context reports {shown}; "
+        f"currently installed: {installed}. Use the installed version for "
+        "reproduction and bug matching."
+    )
+
+
+def _environment(topology: dict | None = None, issue: dict | None = None,
+                 software: list[dict] | None = None) -> list[str]:
     os_release = {}
     for line in read_text("/etc/os-release").splitlines():
         if "=" in line:
             k, v = line.split("=", 1)
             os_release[k] = v.strip('"')
     topo = topology or core2.topology()
+    software = software if software is not None else _software_versions(issue)
     cpu = ""
     for line in read_text("/proc/cpuinfo").splitlines():
         if line.lower().startswith("model name"):
@@ -46,6 +131,8 @@ def _environment(topology: dict | None = None) -> list[str]:
         f"- Physical core 2: {core2.presence(topo)}",
         f"- Memory: {human_bytes(mem_kb)}",
     ]
+    for item in software:
+        lines.append(f"- Software: `{item['package']}` {item['version']}")
     if gpu:
         lines.append(f"- GPU: {gpu}")
     platform = " ".join(
@@ -56,6 +143,12 @@ def _environment(topology: dict | None = None) -> list[str]:
     )
     if platform:
         lines.append(f"- Platform: {platform}")
+    bios_version = read_text("/sys/class/dmi/id/bios_version")
+    if bios_version:
+        bios_vendor = read_text("/sys/class/dmi/id/bios_vendor")
+        bios_date = read_text("/sys/class/dmi/id/bios_date")
+        suffix = f" ({bios_date})" if bios_date else ""
+        lines.append(f"- BIOS: {bios_vendor + ' ' if bios_vendor else ''}{bios_version}{suffix}")
     return lines
 
 
@@ -352,8 +445,12 @@ def _core2_table(rows: list[dict], topology: dict | None = None) -> list[str]:
 def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> tuple[str, str]:
     meta = classify.VENDOR_META.get(issue["vendor"], classify.VENDOR_META["local"])
     topo = core2.topology()
+    software = _software_versions(issue)
     shown = issue.get("display") or issue["signature"]
     title = f"[QA] {meta['component']}: {shown[:120]}"
+    version_tag = _version_tag(issue, software)
+    if version_tag:
+        title = f"{title} {version_tag}"
     if _mentions_core2(issue):
         title = f"{title} [{core2.theme_tag(topo)}]"
     rows = issue["rows"]
@@ -373,7 +470,7 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         "",
         "## Environment",
         "",
-        *_environment(topo),
+        *_environment(topo, issue, software),
         "",
     ]
     if issue.get("kind") == "crash":
@@ -396,11 +493,16 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
             if not hold.get("outdated") and hold.get("relevant"):
                 lines.append("- Related packages are held but current.")
             lines.append("")
+    version_note = _version_note(issue, software)
     lines += [
         "## What happens",
         "",
         f"A recurring {issue['kind']} cluster was observed by the local QA sentinel:",
         "",
+    ]
+    if version_note:
+        lines += [version_note, ""]
+    lines += [
         "```",
         redact(example)[:3000] or "(no message captured)",
         "```",

@@ -1719,6 +1719,102 @@ class RaiseGateTests(unittest.TestCase):
             self.assertEqual(manifest["evidence_files"]["ticket.md"], digest)
             self.assertEqual(manifest["viability"]["score"], 6)
 
+    def test_ticket_keeps_an_issue_lifecycle_section(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        conn = self._conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            draft_path = root / "draft.md"
+            draft_path.write_text("# draft\n", encoding="utf-8")
+            conn.execute(
+                "INSERT INTO ticket_drafts(ts,vendor,path,title,issue_key)"
+                " VALUES(datetime('now'),'nvidia',?,?,'k1')",
+                (str(draft_path), "NVRM: Xid 79"),
+            )
+            issue = self._issue()
+            raised, standby = root / "raise", root / "standby"
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"), \
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
+                                   return_value=[issue]), \
+                 mock.patch.object(raise_ticket.report, "append_journal"):
+                result = raise_ticket.run(conn, notify_ready=False)
+
+            directory = pathlib.Path(result["staged"][0])
+            ticket = (directory / "ticket.md").read_text(encoding="utf-8")
+            self.assertIn("## Issue's Lifecycle", ticket)
+            self.assertIn("classified", ticket)
+            log = [
+                json.loads(line) for line in
+                (directory / "evidence" / "lifecycle.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(log[0]["event"], "classified")
+            self.assertEqual(log[0]["to"], "raise")
+
+            with mock.patch.object(config, "RAISE_DIR", raised), \
+                 mock.patch.object(config, "STANDBY_DIR", standby), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"):
+                raise_ticket.reconcile(
+                    conn, {directory.name: "standby"},
+                    {directory.name: {"verdict": {"reasons": ["evidence expired"]}}},
+                )
+
+            moved = standby / directory.name
+            log = [
+                json.loads(line) for line in
+                (moved / "evidence" / "lifecycle.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(log[-1]["event"], "moved")
+            self.assertEqual((log[-1]["from"], log[-1]["to"]), ("raise", "standby"))
+            self.assertEqual(log[-1]["reason"], "evidence expired")
+            ticket = (moved / "ticket.md").read_text(encoding="utf-8")
+            self.assertIn("evidence expired", ticket)
+
+    def test_dedupe_consolidates_into_the_viability_bucket(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        signature = "NVRM: Xid (PCI:0000:01:00): 79"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for base, name, generated in (
+                (root / "raise", "nvidia-raise-new", "2026-11-08T00:00:00Z"),
+                (root / "standby", "nvidia-standby-old", "2026-11-01T00:00:00Z"),
+            ):
+                evidence = base / name / "evidence"
+                evidence.mkdir(parents=True)
+                (evidence / "manifest.json").write_text(json.dumps({
+                    "vendor": "nvidia", "signature": signature,
+                    "kind": "event", "generated": generated,
+                }), encoding="utf-8")
+            with mock.patch.object(config, "RAISE_DIR", root / "raise"), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"):
+                grouped = raise_ticket._existing_by_identity()
+                ident = raise_ticket._identity(signature)
+                winners, merged = raise_ticket._dedupe_existing(
+                    grouped, {ident: "standby"}
+                )
+
+            self.assertEqual(len(winners), 1)
+            winner = next(iter(winners.values()))
+            self.assertEqual(winner["bucket"], "standby")
+            self.assertEqual(winner["path"].name, "nvidia-standby-old")
+            self.assertFalse((root / "raise" / "nvidia-raise-new").exists())
+            self.assertTrue((root / "standby" / "nvidia-standby-old").exists())
+            self.assertEqual(merged[0]["bucket"], "raise")
+
     def test_legacy_rows_evidence_is_normalized(self):
         import json
         import pathlib

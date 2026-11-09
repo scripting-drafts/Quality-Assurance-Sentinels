@@ -56,6 +56,8 @@ KIND_RANK = {"correlation": 0, "crash": 1, "event": 2}
 #   *.md        human-readable reports and instructions
 EVIDENCE_LOGS = "logs.json"
 EVIDENCE_LOGS_LEGACY = "rows.json"
+LIFECYCLE = "lifecycle.jsonl"
+LIFECYCLE_HEADING = "## Issue's Lifecycle"
 
 
 # ---------------------------------------------------------------- assessment
@@ -265,6 +267,171 @@ def _staged_summary(directory, issue: dict, verdict: dict,
     }
 
 
+def _bucket_label(bucket) -> str:
+    value = str(bucket or "")
+    if not value or value.endswith("/"):
+        return value
+    return f"{value}/"
+
+
+def _lifecycle_log(directory) -> object:
+    return directory / "evidence" / LIFECYCLE
+
+
+def _read_lifecycle(directory) -> list[dict]:
+    path = _lifecycle_log(directory)
+    entries: list[dict] = []
+    if not path.exists():
+        return entries
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return entries
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _append_lifecycle(directory, entry: dict) -> bool:
+    """Append one lifecycle step unless it repeats the previous one."""
+    path = _lifecycle_log(directory)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    prior = _read_lifecycle(directory)
+    if prior:
+        last = prior[-1]
+        if all(last.get(key) == entry.get(key)
+               for key in ("event", "from", "to", "reason")):
+            return False
+    util.append_jsonl(path, entry)
+    return True
+
+
+def _ensure_classified(directory, bucket: str, *, kind: str = "",
+                       vendor: str = "", since: str = "",
+                       reason: str = "", score: str = "") -> None:
+    """Record the first classification once; later steps build on it."""
+    if any(entry.get("event") == "classified"
+           for entry in _read_lifecycle(directory)):
+        return
+    _append_lifecycle(directory, {
+        "ts": iso(),
+        "event": "classified",
+        "from": "",
+        "to": bucket,
+        "kind": kind,
+        "vendor": vendor,
+        "since": since,
+        "reason": reason or "first classification",
+        "score": score,
+    })
+
+
+def _ensure_classified_from_manifest(directory, bucket: str) -> None:
+    """Backfill the first classification for tickets staged before lifecycle."""
+    manifest = _read_manifest(directory)
+    viability = manifest.get("viability") or {}
+    score = ""
+    if viability.get("score") is not None and viability.get("max_score"):
+        score = f"{viability.get('score')}/{viability.get('max_score')}"
+    _ensure_classified(
+        directory, bucket,
+        kind=str(manifest.get("kind") or ""),
+        vendor=str(manifest.get("vendor") or ""),
+        since=str(manifest.get("first") or manifest.get("generated") or ""),
+        reason="first classification recovered from the existing manifest",
+        score=score,
+    )
+
+
+def _lifecycle_cell(value) -> str:
+    return str(value or "").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _lifecycle_section(directory) -> list[str]:
+    entries = _read_lifecycle(directory)
+    lines = [LIFECYCLE_HEADING, ""]
+    if not entries:
+        lines += ["No lifecycle steps recorded yet.", ""]
+        return lines
+    first = next((entry for entry in entries
+                  if entry.get("event") == "classified"), None)
+    if first:
+        detail = []
+        if first.get("since"):
+            detail.append(f"first observed {first['since']}")
+        if first.get("kind"):
+            detail.append(str(first["kind"]))
+        if first.get("vendor"):
+            detail.append(str(first["vendor"]))
+        if detail:
+            lines += [f"_First classified: {' · '.join(detail)}._", ""]
+    lines += [
+        "| Time (UTC) | Event | From | To | Reason |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for entry in entries:
+        lines.append("| {} | {} | {} | {} | {} |".format(
+            _lifecycle_cell(entry.get("ts")),
+            _lifecycle_cell(entry.get("event")),
+            _lifecycle_cell(_bucket_label(entry.get("from")) or "-"),
+            _lifecycle_cell(_bucket_label(entry.get("to")) or "-"),
+            _lifecycle_cell(entry.get("reason")),
+        ))
+    lines.append("")
+    return lines
+
+
+def _ticket_with_lifecycle(text: str, directory) -> str:
+    """Replace the lifecycle section at the end of a ticket document."""
+    marker = f"\n{LIFECYCLE_HEADING}"
+    if marker in text:
+        text = text.split(marker, 1)[0]
+    elif text.lstrip().startswith(LIFECYCLE_HEADING):
+        text = ""
+    base = text.rstrip()
+    section = "\n".join(_lifecycle_section(directory)).rstrip()
+    return f"{base}\n\n{section}\n" if base else f"{section}\n"
+
+
+def _sync_ticket_lifecycle(directory) -> None:
+    ticket = directory / "ticket.md"
+    base = ""
+    if ticket.exists():
+        try:
+            base = ticket.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            base = ""
+    # keep the draft body, refresh only the lifecycle tail
+    marker = f"\n{LIFECYCLE_HEADING}"
+    if marker in base:
+        base = base.split(marker, 1)[0]
+    elif base.lstrip().startswith(LIFECYCLE_HEADING):
+        base = ""
+    text = _ticket_with_lifecycle(base, directory)
+    digest = _write(ticket, util.redact(text))
+    manifest_path = directory / "evidence" / "manifest.json"
+    if not manifest_path.exists():
+        return
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    files = data.get("evidence_files")
+    if isinstance(files, dict) and files.get("ticket.md") != digest:
+        files["ticket.md"] = digest
+        _write(
+            manifest_path,
+            json.dumps(data, indent=2, sort_keys=True, default=str) + "\n",
+        )
+
+
 def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
           root=None, bucket: str = "raise", name: str | None = None) -> dict:
     """Create the per-ticket directory with its own evidence.
@@ -290,7 +457,18 @@ def stage(conn, draft: dict, issue: dict, verdict: dict, bundle: dict | None,
                 ticket_text = util.redact(fh.read())
         except OSError:
             ticket_text = ""
-    hashes["ticket.md"] = _write(directory / "ticket.md", ticket_text)
+    _ensure_classified(
+        directory, bucket,
+        kind=str(issue.get("kind") or ""),
+        vendor=str(issue.get("vendor") or ""),
+        since=str(draft.get("ts") or issue.get("first") or ""),
+        reason="draft classified for " + str(issue.get("vendor") or "an unknown vendor"),
+        score=f"{verdict.get('score')}/{verdict.get('max_score')}",
+    )
+    hashes["ticket.md"] = _write(
+        directory / "ticket.md",
+        _ticket_with_lifecycle(ticket_text, directory),
+    )
 
     rows = _redact_rows(issue.get("rows") or [])
     hashes[f"evidence/{EVIDENCE_LOGS}"] = _write(
@@ -574,13 +752,18 @@ def _existing_by_identity() -> dict[str, list[dict]]:
     return grouped
 
 
-def _dedupe_existing(grouped: dict[str, list[dict]]) -> tuple[dict[str, dict], list[dict]]:
-    """Keep one directory per signature and park the older copies.
+def _dedupe_existing(grouped: dict[str, list[dict]],
+                     desired: dict[str, str] | None = None
+                     ) -> tuple[dict[str, dict], list[dict]]:
+    """Keep one directory per signature in the bucket viability requires.
 
-    Vendor reclassification, legacy buckets, and event/correlation views all
-    describe the same fault when the signature matches. Nothing is deleted:
-    losing directories move under the winner's evidence/ as prior copies.
+    When the same signature appears in several buckets or views, the survivor
+    is the copy already in the bucket the current viability verdict asks for.
+    Ties fall back to kind rank and then to the newest manifest. Nothing is
+    deleted: losing directories move under the winner's evidence/ as prior
+    copies.
     """
+    desired = desired or {}
     winners: dict[str, dict] = {}
     merged: list[dict] = []
     for ident, items in grouped.items():
@@ -588,10 +771,11 @@ def _dedupe_existing(grouped: dict[str, list[dict]]) -> tuple[dict[str, dict], l
         if not active:
             # Keep legacy archives intact when no live bucket owns the ticket.
             continue
+        target = desired.get(ident, "standby")
         winner = max(
             active,
             key=lambda item: (
-                item["bucket"] == "raise",
+                item["bucket"] == target,
                 -KIND_RANK.get(item["kind"], 3),
                 item["generated"],
             ),
@@ -600,10 +784,19 @@ def _dedupe_existing(grouped: dict[str, list[dict]]) -> tuple[dict[str, dict], l
             if item is winner:
                 continue
             _merge_into(item["path"], winner["path"], item["bucket"])
+            reason = f"duplicate {item['bucket']}/{item['path'].name}"
             _record_event(
-                winner["path"], "dedupe.jsonl", "merged",
-                f"duplicate {item['bucket']}/{item['path'].name}",
+                winner["path"], "dedupe.jsonl", "merged", reason,
             )
+            _ensure_classified_from_manifest(winner["path"], winner["bucket"])
+            _append_lifecycle(winner["path"], {
+                "ts": iso(),
+                "event": "merged",
+                "from": f"{item['bucket']}/{item['path'].name}",
+                "to": winner["bucket"],
+                "reason": reason,
+            })
+            _sync_ticket_lifecycle(winner["path"])
             merged.append({
                 "ticket": item["path"].name,
                 "kept": winner["path"].name,
@@ -638,6 +831,10 @@ def reconcile(conn, desired: dict[str, str],
     for name, source in sorted(present.items()):
         target = desired.get(name, "standby")
         if target == source:
+            # Backfill tickets staged before lifecycle tracking existed.
+            directory = roots[source] / name
+            _ensure_classified_from_manifest(directory, source)
+            _sync_ticket_lifecycle(directory)
             continue
         src = roots[source] / name
         destination = roots[target] / name
@@ -651,6 +848,17 @@ def reconcile(conn, desired: dict[str, str],
             info.get("verdict", {}).get("reasons")
             or ["no current draft reproduces this ticket"]
         )[:500]
+
+        _ensure_classified_from_manifest(destination, source)
+        _append_lifecycle(destination, {
+            "ts": iso(),
+            "event": "moved",
+            "from": source,
+            "to": target,
+            "reason": reason,
+        })
+        _sync_ticket_lifecycle(destination)
+
         if target == "raise":
             _record_event(destination, "standby.jsonl", "reactivated",
                           "viability checks passed again")
@@ -776,6 +984,7 @@ def run(conn, days: int = 30, min_count: int | None = None,
     raised, rejected, rejected_staged = [], [], []
     assessments: dict[str, dict] = {}
     desired: dict[str, str] = {}
+    desired_by_ident: dict[str, str] = {}
     deduplicated: list[dict] = []
 
     # One ticket per vendor+signature. A correlation and a plain event for the
@@ -820,7 +1029,9 @@ def run(conn, days: int = 30, min_count: int | None = None,
     # Collapse duplicates that are already on disk before deciding what to
     # stage. The surviving directory name is reused instead of minting a new
     # one from a different issue key.
-    existing, merged_existing = _dedupe_existing(_existing_by_identity())
+    existing, merged_existing = _dedupe_existing(
+        _existing_by_identity(), desired_by_ident
+    )
 
     for ident, group in groups.items():
         draft, issue, verdict = group["draft"], group["issue"], group["verdict"]
@@ -834,6 +1045,7 @@ def run(conn, days: int = 30, min_count: int | None = None,
             desired[name] = "rejected"
         else:
             desired[name] = "standby"
+        desired_by_ident[ident] = desired[name]
         assessments[name] = {"draft": draft, "verdict": verdict}
         if not (verdict["viable"] and issue):
             rejected.append({

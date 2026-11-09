@@ -1778,6 +1778,97 @@ class RaiseGateTests(unittest.TestCase):
             ticket = (moved / "ticket.md").read_text(encoding="utf-8")
             self.assertIn("evidence expired", ticket)
 
+    def test_rejected_ticket_does_not_move_without_reproduction(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            rejected = root / "rejected"
+            evidence = rejected / "nvidia-held" / "evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "manifest.json").write_text(json.dumps({
+                "vendor": "nvidia", "signature": "NVRM: Xid 79",
+                "kind": "crash", "generated": "2026-11-01T00:00:00Z",
+            }), encoding="utf-8")
+            with mock.patch.object(config, "RAISE_DIR", root / "raise"), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", rejected):
+                raise_ticket.reconcile(
+                    None, {"nvidia-held": "standby"},
+                    {"nvidia-held": {
+                        "verdict": {"reasons": ["no current evidence"]},
+                        "reproduced": False,
+                    }},
+                )
+
+            self.assertTrue((rejected / "nvidia-held").exists())
+            self.assertFalse((root / "standby" / "nvidia-held").exists())
+
+    def test_rejected_reproduction_moves_to_standby_then_raise(self):
+        import json
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config, raise_ticket
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            rejected = root / "rejected"
+            evidence = rejected / "nvidia-held" / "evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "manifest.json").write_text(json.dumps({
+                "vendor": "nvidia", "signature": "NVRM: Xid 79",
+                "kind": "crash", "generated": "2026-11-01T00:00:00Z",
+            }), encoding="utf-8")
+            patches = [
+                mock.patch.object(config, "RAISE_DIR", root / "raise"),
+                mock.patch.object(config, "STANDBY_DIR", root / "standby"),
+                mock.patch.object(config, "REJECT_DIR", rejected),
+            ]
+            for patcher in patches:
+                patcher.start()
+            try:
+                raise_ticket.reconcile(
+                    None, {"nvidia-held": "standby"},
+                    {"nvidia-held": {
+                        "verdict": {"reasons": ["1 crash row; need 3 occurrences"]},
+                        "reproduced": True,
+                    }},
+                )
+                moved = root / "standby" / "nvidia-held"
+                self.assertTrue(moved.exists())
+                log = [
+                    json.loads(line) for line in
+                    (moved / "evidence" / "lifecycle.jsonl").read_text().splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(log[-1]["event"], "moved")
+                self.assertTrue(log[-1]["reason"].startswith(
+                    "new reproduction of the previously rejected issue"))
+
+                raise_ticket.reconcile(
+                    None, {"nvidia-held": "raise"},
+                    {"nvidia-held": {"verdict": {"reasons": []},
+                                     "reproduced": True}},
+                )
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+
+            raised = root / "raise" / "nvidia-held"
+            self.assertTrue(raised.exists())
+            log = [
+                json.loads(line) for line in
+                (raised / "evidence" / "lifecycle.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(log[-1]["to"], "raise")
+            self.assertIn("further reproduction", log[-1]["reason"])
+
     def test_dedupe_consolidates_into_the_viability_bucket(self):
         import json
         import pathlib

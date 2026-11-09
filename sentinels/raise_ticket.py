@@ -829,7 +829,13 @@ def reconcile(conn, desired: dict[str, str],
 
     reactivated, stood_down, rejected_moves = [], [], []
     for name, source in sorted(present.items()):
-        target = desired.get(name, "standby")
+        # A rejection stands until the issue reproduces again: a rejected
+        # ticket must not drift to standby just because evidence aged out.
+        target = desired.get(name, "rejected" if source == "rejected" else "standby")
+        info = assessments.get(name) or {}
+        if (source == "rejected" and target == "standby"
+                and not info.get("reproduced", False)):
+            target = "rejected"
         if target == source:
             # Backfill tickets staged before lifecycle tracking existed.
             directory = roots[source] / name
@@ -843,11 +849,24 @@ def reconcile(conn, desired: dict[str, str],
         else:
             shutil.move(str(src), str(destination))
 
-        info = assessments.get(name) or {}
-        reason = "; ".join(
-            info.get("verdict", {}).get("reasons")
-            or ["no current draft reproduces this ticket"]
-        )[:500]
+        verdict_reasons = "; ".join(
+            (info.get("verdict", {}).get("reasons") or [])
+        )
+        if target == "raise":
+            if source == "standby":
+                reason = "further reproduction passes the viability checks"
+            elif source == "rejected":
+                reason = "cleared; a new reproduction passes the viability checks"
+            else:
+                reason = verdict_reasons or "viability checks passed"
+        elif target == "rejected":
+            reason = verdict_reasons or "held or outdated build explains the issue"
+        else:
+            reason = verdict_reasons or "no current draft reproduces this ticket"
+            if source == "rejected":
+                reason = ("new reproduction of the previously rejected issue; "
+                          + reason)
+        reason = reason[:500]
 
         _ensure_classified_from_manifest(destination, source)
         _append_lifecycle(destination, {
@@ -1046,7 +1065,11 @@ def run(conn, days: int = 30, min_count: int | None = None,
         else:
             desired[name] = "standby"
         desired_by_ident[ident] = desired[name]
-        assessments[name] = {"draft": draft, "verdict": verdict}
+        assessments[name] = {
+            "draft": draft,
+            "verdict": verdict,
+            "reproduced": issue is not None,
+        }
         if not (verdict["viable"] and issue):
             rejected.append({
                 "key": draft["issue_key"],

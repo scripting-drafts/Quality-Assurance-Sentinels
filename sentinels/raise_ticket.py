@@ -991,8 +991,9 @@ crash still reproduces on the current build.
 
 
 # ---------------------------------------------------------------- run
-def run(conn, days: int = 30, min_count: int | None = None,
+def run(conn, days: int | None = None, min_count: int | None = None,
         notify_ready: bool = True) -> dict:
+    days = config.RAISE_LOOKBACK_DAYS if days is None else days
     config.RAISE_DIR.mkdir(parents=True, exist_ok=True)
     config.REJECT_DIR.mkdir(parents=True, exist_ok=True)
     issues = {i["key"]: i for i in tickets.collect_issues(conn, days)}

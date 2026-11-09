@@ -8,6 +8,7 @@ reports/
 config/identity.env
 config/hardware-sources.json
 config/siem.json
+config/settings.json
 !config/identity.env.example
 
 # Generated build artifacts (build per host)

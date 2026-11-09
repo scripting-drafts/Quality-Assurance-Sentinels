@@ -413,6 +413,8 @@ def records(limit: int = 20) -> list[dict]:
 
 def prune() -> int:
     """Drop capture records beyond the event-retention window."""
+    if config.SHUTDOWN_RETENTION_DAYS <= 0:
+        return 0
     cutoff = utcnow() - timedelta(days=config.SHUTDOWN_RETENTION_DAYS)
     removed = 0
     for path in config.SHUTDOWN_DIR.glob("*.json"):

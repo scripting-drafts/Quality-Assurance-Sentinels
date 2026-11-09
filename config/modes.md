@@ -7,14 +7,22 @@ environment variable read by `bin/qa`.
   warnings), including every process that logs.
 - `QA_JOURNAL_PRIORITY=debug` — go further; expect a very large database.
 - `QA_KEEP_FOREVER=1` — disable event/sample/process/inventory retention.
+- `QA_EVENT_RETENTION_DAYS=0` — event retention; `0` keeps events forever.
+- `QA_SAMPLE_RETENTION_DAYS=0`, `QA_PROC_RETENTION_DAYS=0` — sample and
+  process snapshot retention; `0` keeps them forever.
+- `QA_INVENTORY_RETENTION_DAYS=0` — inventory retention; `0` keeps it forever.
+- `QA_DRAFTS_RETENTION_DAYS=30` — keep regenerated draft documents this long.
+- `QA_RAISE_LOOKBACK_DAYS=30` — evidence window used by the raise gate.
+- `QA_CYCLE_RAISE_HOURS=1` — raise-gate cadence in hours;
+  `QA_CYCLE_RAISE_S` overrides it in seconds.
 - `QA_MAX_TICKETS=10` — draft cap per run; substantive issues are prioritised
   before the cap so one-off warnings cannot crowd out high-volume faults.
   Set `0` for no limit.
 - `QA_EVIDENCE_EVENT_LIMIT=0` — put every event in an evidence bundle.
 - `QA_SHUTDOWN_DIR=var/shutdown` — where the shutdown listener writes its
   capture records.
-- `QA_SHUTDOWN_RETENTION_DAYS=30` — capture retention; defaults to the event
-  retention period.
+- `QA_SHUTDOWN_RETENTION_DAYS` — capture retention; defaults to the event
+  retention period (`0` keeps captures forever).
 - `QA_CAPTURE_REDACTION=strict` — capture redaction profile: `strict`
   (default, preserves path shape), `collapsed` (replaces paths/URLs), or
   `metadata` (withholds message text).
@@ -26,7 +34,8 @@ environment variable read by `bin/qa`.
 - `QA_DEEP_DURATION_S=30`, `QA_DEEP_MAX_DURATION_S=120` — trace window.
 - `QA_DEEP_REQUEST_COOLDOWN_S=1800` — minimum gap per finding.
 - `QA_CYCLE_CORRELATE_S=300` — correlation refresh and notification drain cadence.
-- `QA_CYCLE_RAISE_S=3600` — ticket raise-gate re-triage cadence.
+- The dashboard writes `config/settings.json`; explicit environment variables
+  still take precedence over that file.
 - `QA_CYCLE_CROSSCHECK_S=21600` — crosscheck cadence.
 - `QA_CYCLE_DAILY_HOUR=8` — earliest local hour for the daily report.
 - `QA_LOG_MAX_MB=20`, `QA_LOG_KEEP=10` — `var/cron.log` rotates by

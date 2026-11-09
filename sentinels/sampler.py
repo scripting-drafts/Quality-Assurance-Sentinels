@@ -104,18 +104,25 @@ def prune(conn) -> None:
         ("proc_snap", config.PROC_RETENTION_DAYS),
         ("events", config.EVENT_RETENTION_DAYS),
     ):
+        if days <= 0:
+            continue
         conn.execute(
             f"DELETE FROM {table} WHERE ts < datetime('now', ?)",
             (f"-{days} days",),
         )
-    cutoff = f"-{config.INVENTORY_RETENTION_DAYS} days"
-    conn.execute(
-        "DELETE FROM inventory WHERE run_id IN "
-        "(SELECT id FROM inventory_runs WHERE ts < datetime('now', ?))",
-        (cutoff,),
-    )
-    conn.execute("DELETE FROM inventory_diffs WHERE ts < datetime('now', ?)", (cutoff,))
-    conn.execute("DELETE FROM inventory_runs WHERE ts < datetime('now', ?)", (cutoff,))
+    if config.INVENTORY_RETENTION_DAYS > 0:
+        cutoff = f"-{config.INVENTORY_RETENTION_DAYS} days"
+        conn.execute(
+            "DELETE FROM inventory WHERE run_id IN "
+            "(SELECT id FROM inventory_runs WHERE ts < datetime('now', ?))",
+            (cutoff,),
+        )
+        conn.execute(
+            "DELETE FROM inventory_diffs WHERE ts < datetime('now', ?)", (cutoff,)
+        )
+        conn.execute(
+            "DELETE FROM inventory_runs WHERE ts < datetime('now', ?)", (cutoff,)
+        )
     hw_cutoff = f"-{config.HARDWARE_RETENTION_DAYS} days"
     conn.execute(
         "DELETE FROM hardware_items WHERE run_id IN "

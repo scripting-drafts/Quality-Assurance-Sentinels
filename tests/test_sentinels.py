@@ -2576,8 +2576,10 @@ class NotificationTraceCrosscheckTests(unittest.TestCase):
             plain.assert_called_once()
 
     def test_draft_regeneration_keeps_the_index_page(self):
+        import os
         import pathlib
         import tempfile
+        import time
         from unittest import mock
         from sentinels import config, tickets
 
@@ -2586,13 +2588,19 @@ class NotificationTraceCrosscheckTests(unittest.TestCase):
             (d / "INDEX.md").write_text("# index\n")
             stale = d / "stale-draft.md"
             stale.write_text("old\n")
+            old_time = time.time() - 2 * 86400
+            os.utime(stale, (old_time, old_time))
+            fresh = d / "fresh-draft.md"
+            fresh.write_text("recent\n")
             with mock.patch.object(config, "DRAFT_DIR", d), \
+                 mock.patch.object(config, "DRAFT_RETENTION_DAYS", 1), \
                  mock.patch.object(config, "MAX_TICKETS", 10), \
                  mock.patch.object(tickets, "collect_issues", return_value=[]):
                 conn = self._conn()
                 tickets.generate(conn, days=1)
             self.assertTrue((d / "INDEX.md").exists())
             self.assertFalse(stale.exists())
+            self.assertTrue(fresh.exists())
 
     def test_correlation_report_is_written_as_markdown(self):
         import pathlib
@@ -2758,6 +2766,88 @@ class NotificationTraceCrosscheckTests(unittest.TestCase):
             os.environ.pop("NO_COLOR", None)
             if saved is not None:
                 os.environ["NO_COLOR"] = saved
+
+
+class SettingsConfigTests(unittest.TestCase):
+    def test_dashboard_settings_file_only_accepts_numbers(self):
+        import json
+        import os
+        import pathlib
+        import tempfile
+        from unittest import mock
+        from sentinels import config
+
+        keys = (
+            "QA_EVENT_RETENTION_DAYS", "QA_CYCLE_RAISE_HOURS",
+            "QA_PRIVILEGED", "QA_BAD", "NOT_QA", "QA_SAMPLE_RETENTION_DAYS",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "settings.json"
+            path.write_text(json.dumps({
+                "QA_EVENT_RETENTION_DAYS": 12,
+                "QA_CYCLE_RAISE_HOURS": "2.5",
+                "QA_PRIVILEGED": "rm -rf /",
+                "QA_BAD": "12; echo pwned",
+                "NOT_QA": 1,
+            }), encoding="utf-8")
+            clean = {key: value for key, value in os.environ.items()
+                     if key not in keys}
+            clean["QA_SAMPLE_RETENTION_DAYS"] = "5"
+            with mock.patch.dict(os.environ, clean, clear=True):
+                config.apply_settings_file(path)
+                self.assertEqual(os.environ["QA_EVENT_RETENTION_DAYS"], "12")
+                self.assertEqual(os.environ["QA_CYCLE_RAISE_HOURS"], "2.5")
+                self.assertEqual(os.environ["QA_SAMPLE_RETENTION_DAYS"], "5")
+                self.assertNotIn("QA_PRIVILEGED", os.environ)
+                self.assertNotIn("QA_BAD", os.environ)
+                self.assertNotIn("NOT_QA", os.environ)
+
+    def test_zero_retention_keeps_events_until_changed(self):
+        import sqlite3
+        from unittest import mock
+        from sentinels import config, db, sampler
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        conn.execute(
+            "INSERT INTO events(ts,severity,fingerprint) VALUES(?,?,?)",
+            ("2000-01-01T00:00:00Z", "error", "old-fp"),
+        )
+        with mock.patch.object(config, "KEEP_FOREVER", False), \
+             mock.patch.object(config, "SAMPLE_RETENTION_DAYS", 0), \
+             mock.patch.object(config, "PROC_RETENTION_DAYS", 0), \
+             mock.patch.object(config, "EVENT_RETENTION_DAYS", 0), \
+             mock.patch.object(config, "INVENTORY_RETENTION_DAYS", 0):
+            sampler.prune(conn)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+            with mock.patch.object(config, "EVENT_RETENTION_DAYS", 1):
+                sampler.prune(conn)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
+
+    def test_raise_gate_uses_the_configured_lookback(self):
+        import pathlib
+        import sqlite3
+        import tempfile
+        from unittest import mock
+        from sentinels import config, db, raise_ticket
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with mock.patch.object(config, "RAISE_DIR", root / "raise"), \
+                 mock.patch.object(config, "STANDBY_DIR", root / "standby"), \
+                 mock.patch.object(config, "REJECT_DIR", root / "rejected"), \
+                 mock.patch.object(config, "RAISE_LOOKBACK_DAYS", 17), \
+                 mock.patch.object(raise_ticket.tickets, "collect_issues",
+                                   return_value=[]) as collect, \
+                 mock.patch.object(raise_ticket.report, "append_journal"):
+                raise_ticket.run(conn, notify_ready=False)
+            self.assertEqual(collect.call_args[0][1], 17)
 
 
 if __name__ == "__main__":

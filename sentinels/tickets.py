@@ -611,16 +611,25 @@ def generate(conn, days: int = 7, include_local: bool = False, max_tickets: int 
             (iso(), vendor, str(path), title, issue["key"]),
         )
         made.append({"vendor": vendor, "title": title, "path": str(path), "count": issue["count"]})
+    retention = config.DRAFT_RETENTION_DAYS
+    cutoff = utcnow().timestamp() - retention * 86400
     for old in config.DRAFT_DIR.glob("*.md"):
         if old.name == "INDEX.md":  # generated digest target, not a draft
             continue
-        if str(old) not in keep:
+        if str(old) in keep:
+            continue
+        if retention > 0:
             try:
-                old.unlink(missing_ok=True)
-            except PermissionError:
-                # Root-owned leftovers are reported by the security tier; do
-                # not let them stop the operator-owned draft set.
+                if old.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
                 continue
+        try:
+            old.unlink(missing_ok=True)
+        except PermissionError:
+            # Root-owned leftovers are reported by the security tier; do
+            # not let them stop the operator-owned draft set.
+            continue
     db.meta_set(conn, "last_ticket_run", iso())
     _triage_new_tickets(conn, selected)
     return made

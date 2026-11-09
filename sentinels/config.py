@@ -1,6 +1,8 @@
 """Central paths and constants for QA Sentinels."""
+import json
 import os
 import pathlib
+import re
 
 PROJECT_NAME = "QA Sentinels"
 PROJECT_SHORT = "QA Sentinels"
@@ -11,6 +13,35 @@ PROJECT_DIR = "Quality-Assurance-Sentinels"
 
 HOME = pathlib.Path(os.environ.get("HOME", pathlib.Path.home()))
 ROOT = pathlib.Path(os.environ.get("QA_SENTINELS_HOME", HOME / PROJECT_DIR)).resolve()
+
+SETTINGS_FILE = ROOT / "config" / "settings.json"
+
+
+def apply_settings_file(path=None) -> None:
+    """Load numeric QA_* overrides written by the dashboard.
+
+    Values are only accepted when the key is missing from the environment and
+    the value is a bare number, so the file can never inject shell content.
+    """
+    target = pathlib.Path(path) if path else SETTINGS_FILE
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    for key, value in data.items():
+        if not isinstance(key, str) or not key.startswith("QA_"):
+            continue
+        if key in os.environ:
+            continue
+        text = str(value).strip()
+        if not re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+            continue
+        os.environ[key] = text
+
+
+apply_settings_file()
 
 BIN = ROOT / "bin"
 VAR = ROOT / "var"
@@ -67,7 +98,12 @@ DEEP_REQUEST_COOLDOWN_S = int(os.environ.get("QA_DEEP_REQUEST_COOLDOWN_S", "1800
 # layer 1 cycle: one command every minute owns the whole routine loop, so cron
 # and systemd schedules stay equivalent. Each task is due-based and persisted.
 CYCLE_CORRELATE_S = int(os.environ.get("QA_CYCLE_CORRELATE_S", "300"))
-CYCLE_RAISE_S = int(os.environ.get("QA_CYCLE_RAISE_S", "3600"))
+CYCLE_RAISE_HOURS = float(os.environ.get("QA_CYCLE_RAISE_HOURS", "1") or "1")
+if CYCLE_RAISE_HOURS <= 0:
+    CYCLE_RAISE_HOURS = 1.0
+CYCLE_RAISE_S = int(os.environ.get(
+    "QA_CYCLE_RAISE_S", str(max(60, int(CYCLE_RAISE_HOURS * 3600)))
+))
 CYCLE_CROSSCHECK_S = int(os.environ.get("QA_CYCLE_CROSSCHECK_S", str(6 * 3600)))
 CYCLE_DAILY_HOUR = int(os.environ.get("QA_CYCLE_DAILY_HOUR", "8"))
 PSI_MEMORY_FULL_ALERT = float(os.environ.get("QA_PSI_MEMORY_FULL_ALERT", "10"))
@@ -141,14 +177,22 @@ RAISE_MAX_AGE_DAYS = int(os.environ.get("QA_RAISE_MAX_AGE_DAYS", "30"))
 if JOURNAL_PRIORITY not in ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"):
     JOURNAL_PRIORITY = "warning"
 
-# retention
-EVENT_RETENTION_DAYS = int(os.environ.get("QA_EVENT_RETENTION_DAYS", "30"))
-SHUTDOWN_RETENTION_DAYS = int(
+# retention: 0 keeps a class forever, matching the dashboard defaults
+EVENT_RETENTION_DAYS = max(0, int(os.environ.get("QA_EVENT_RETENTION_DAYS", "0")))
+SHUTDOWN_RETENTION_DAYS = max(0, int(
     os.environ.get("QA_SHUTDOWN_RETENTION_DAYS", str(EVENT_RETENTION_DAYS))
+))
+SAMPLE_RETENTION_DAYS = max(0, int(os.environ.get("QA_SAMPLE_RETENTION_DAYS", "0")))
+PROC_RETENTION_DAYS = max(0, int(os.environ.get("QA_PROC_RETENTION_DAYS", "0")))
+INVENTORY_RETENTION_DAYS = max(
+    0, int(os.environ.get("QA_INVENTORY_RETENTION_DAYS", "0"))
 )
-SAMPLE_RETENTION_DAYS = int(os.environ.get("QA_SAMPLE_RETENTION_DAYS", "7"))
-PROC_RETENTION_DAYS = int(os.environ.get("QA_PROC_RETENTION_DAYS", "3"))
-INVENTORY_RETENTION_DAYS = int(os.environ.get("QA_INVENTORY_RETENTION_DAYS", "90"))
+DRAFT_RETENTION_DAYS = max(
+    0, int(os.environ.get("QA_DRAFTS_RETENTION_DAYS", "30"))
+)
+RAISE_LOOKBACK_DAYS = max(
+    1, int(os.environ.get("QA_RAISE_LOOKBACK_DAYS", "30"))
+)
 
 # execution-log rotation: copytruncate at the cap and keep a bounded set, so
 # var/cron.log cannot grow without limit or rotate into thousands of tiny files

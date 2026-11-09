@@ -1288,7 +1288,7 @@ def cmd_cycle(args) -> int:
 
         if _cycle_due(conn, "raise", config.CYCLE_RAISE_S):
             try:
-                gate = raise_ticket.run(conn, days=30)
+                gate = raise_ticket.run(conn, days=config.RAISE_LOOKBACK_DAYS)
                 result["raise"] = {
                     "viable": gate["viable"],
                     "rejected": gate["rejected"],
@@ -1445,7 +1445,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_holds)
 
     s = sub.add_parser("raise", help="stage viable tickets under raise/, held-outdated ones under rejected/")
-    s.add_argument("--days", type=int, default=30)
+    s.add_argument("--days", type=int, default=config.RAISE_LOOKBACK_DAYS)
     s.add_argument("--min-count", type=int)
     s.add_argument("--no-notify", action="store_true")
     s.set_defaults(func=cmd_raise)

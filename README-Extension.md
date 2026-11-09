@@ -1,4 +1,4 @@
-# Quality Assurance Sentinels — extension guide
+# QA Sentinels — extension guide
 
 ## Command reference
 

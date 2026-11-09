@@ -27,7 +27,7 @@ install -o root -g root -m 0755 "$ROOT/root/lsm-read-helper.py" "$HELPER"
 
 cat >"$SERVICE" <<EOF
 [Unit]
-Description=Quality Assurance Sentinels root LSM state reader
+Description=QA Sentinels root LSM state reader
 Documentation=file://$ROOT/docs/LSM.md
 After=local-fs.target
 ConditionPathExists=$ROOT/bin/qa

@@ -25,7 +25,7 @@ GROUP_NAME="$(id -gn "$USER_NAME")"
 
 cat >"$SERVICE" <<EOF
 [Unit]
-Description=Quality Assurance Sentinels hardware-health tier
+Description=QA Sentinels hardware-health tier
 Documentation=file://$ROOT/docs/HARDWARE.md
 After=local-fs.target
 ConditionPathExists=$ROOT/bin/qa

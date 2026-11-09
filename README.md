@@ -1,10 +1,10 @@
-# Quality Assurance Sentinels
+# QA Sentinels
 
 **Security Focused Evidence Collecting Probes**
 
 **Local monitoring and evidence system**
 
-Quality Assurance Sentinels (QA Sentinels) periodically samples the system, examines journal and crash records, and organizes findings into reports and verifiable evidence bundles. When an incident warrants closer inspection, it can queue a separate, more privileged tracing run. It also helps correlate repeated failures and prepare vendor bug-report drafts; it does not submit tickets automatically.
+QA Sentinels periodically samples the system, examines journal and crash records, and organizes findings into reports and verifiable evidence bundles. When an incident warrants closer inspection, it can queue a separate, more privileged tracing run. It also helps correlate repeated failures and prepare vendor bug-report drafts; it does not submit tickets automatically.
 
 The project pays particular attention to physical CPU core 2. Core affinity is captured as diagnostic context.
 

@@ -1349,7 +1349,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="qa",
         description=(
-            f"Quality Assurance Sentinels — {config.PROJECT_DESCRIPTION}: "
+            f"{config.PROJECT_NAME} — {config.PROJECT_DESCRIPTION}: "
             "kernel, memory, CPU and process evidence."
         ),
     )

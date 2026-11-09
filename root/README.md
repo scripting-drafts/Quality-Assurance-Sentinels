@@ -1,4 +1,4 @@
-# Quality Assurance Sentinels — root-only evidence (optional)
+# QA Sentinels — root-only evidence (optional)
 
 The sentinel itself runs unprivileged. It already reads the journal through the
 `adm` group, user coredumps and all of `/proc` and `/sys`.

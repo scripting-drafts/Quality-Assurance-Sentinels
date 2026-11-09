@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove installed Quality Assurance Sentinels hooks and build outputs, keeping gathered data.
+# Remove installed QA Sentinels hooks and build outputs, keeping gathered data.
 #
 # Default: removes the systemd units, the user cron block, the live-log
 # autostart entry and compiled binaries. Keeps var/, journal/, evidence/,
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_NAME="Quality Assurance Sentinels"
+PROJECT_NAME="QA Sentinels"
 DRY_RUN=0
 ASSUME_YES=0
 KEEP_BUILD=0

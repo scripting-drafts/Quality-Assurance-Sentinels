@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single installer for Quality Assurance Sentinels.
+# Single installer for QA Sentinels.
 #
 # Two layers can be added independently:
 #   layer 1  collection: build the sampler, initialise the store,
@@ -27,7 +27,7 @@ set -euo pipefail
 # The installer lives in the checkout, so its own directory is the root. The
 # old /.. suffix targeted the checkout's parent and broke every relative path.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_NAME="Quality Assurance Sentinels"
+PROJECT_NAME="QA Sentinels"
 
 LAYER1=""
 LAYER2=""

@@ -18,7 +18,7 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT_NAME="Quality Assurance Sentinels"
+PROJECT_NAME="QA Sentinels"
 USER_NAME="${QA_SENTINEL_USER:-}"
 TAKEOVER=0
 LAYER2_ONLY=0

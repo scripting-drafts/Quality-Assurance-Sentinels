@@ -48,7 +48,7 @@ GROUP_NAME="$(id -gn "$USER_NAME")"
 
 cat >"$SERVICE" <<EOF
 [Unit]
-Description=Quality Assurance Sentinels boot and shutdown error listener
+Description=QA Sentinels boot and shutdown error listener
 Documentation=file://$ROOT/docs/SHUTDOWN.md
 DefaultDependencies=no
 After=umount.target systemd-journald.service

@@ -221,7 +221,7 @@ def _repro_block(vendor: str, topology: dict | None = None) -> list[str]:
             "4. Replace or re-seat the CPU only after the vendor confirms the diagnosis.",
         ]
     return [
-        "1. Reproduce with the sentinel running (`~/Quality-Assurance-Sentinels/bin/qa status`).",
+        "1. Reproduce with the sentinel running (`~/QA-Sentinels/bin/qa status`).",
         "2. Attach the latest evidence bundle.",
     ]
 
@@ -541,11 +541,11 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
             f"- Bundle SHA-256: `{bundle.get('sha256')}`",
             f"- Previous bundle SHA-256: `{bundle.get('prev_sha256')}`",
             f"- Contents: {bundle.get('contents', '')}",
-            f"- Verify with: `cd ~/Quality-Assurance-Sentinels && bin/qa verify {shown}`",
+            f"- Verify with: `cd ~/QA-Sentinels && bin/qa verify {shown}`",
         ]
     else:
         lines += [
-            "- No bundle generated yet. Run `~/Quality-Assurance-Sentinels/bin/qa evidence --reason ticket` and attach it.",
+            "- No bundle generated yet. Run `~/QA-Sentinels/bin/qa evidence --reason ticket` and attach it.",
         ]
     lines += [
         "",

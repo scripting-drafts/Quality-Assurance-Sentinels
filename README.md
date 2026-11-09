@@ -47,8 +47,8 @@ Layer 1 is optional and covers the routine monitor; layer 2 adds deep tracing. T
 Run these commands **from the directory containing the cloned repository**:
 
 ```bash
-git clone https://github.com/scripting-drafts/Quality-Assurance-Sentinels.git
-cd Quality-Assurance-Sentinels
+git clone https://github.com/scripting-drafts/Quality-Assurance-Sentinels.git QA-Sentinels
+cd QA-Sentinels
 
 # Compile the local sampler into bin/qa_sample.
 make -C src install

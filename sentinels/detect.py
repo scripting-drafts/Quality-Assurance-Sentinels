@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from . import boot, classify, config, db, holds, triage
+from . import boot, classify, config, core2, db, holds, triage
 from .util import iso, parse_iso, sha256_text, utcnow
 
 # journal rules, highest severity first
@@ -272,6 +272,7 @@ def scan(conn, hours: int = 24) -> list[dict]:
         _crash_findings(conn, since)
         + _event_findings(conn, since)
         + _sample_findings(conn)
+        + core2.findings(conn)
         + boot.findings(conn, since)
     )
     new = []

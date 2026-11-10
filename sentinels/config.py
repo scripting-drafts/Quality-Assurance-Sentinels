@@ -111,6 +111,15 @@ MEM_AVAILABLE_ALERT_PCT = float(os.environ.get("QA_MEM_AVAILABLE_ALERT_PCT", "5"
 TEMP_ALERT_C = float(os.environ.get("QA_TEMP_ALERT_C", "90"))
 IO_PRESSURE_ALERT = float(os.environ.get("QA_IO_PRESSURE_ALERT", "50"))
 CORE2_CPUS = tuple(int(x) for x in os.environ.get("QA_CORE2_CPUS", "2,8").split(",") if x)
+CORE2_ENABLE = os.environ.get("QA_CORE2_ENABLE", "1").lower() in ("1", "yes", "true", "on")
+CORE2_ENFORCE = os.environ.get("QA_CORE2_ENFORCE", "auto").lower()
+if CORE2_ENFORCE not in ("auto", "lab", "retired", "off"):
+    CORE2_ENFORCE = "auto"
+CORE2_MODE_FILE = pathlib.Path(os.environ.get("QA_CORE2_MODE_FILE", "/etc/faultlab/mode"))
+CORE2_CPU_ROOT = pathlib.Path(os.environ.get("QA_CORE2_CPU_ROOT", "/sys/devices/system/cpu"))
+CORE2_CGROUP_ROOT = pathlib.Path(os.environ.get("QA_CORE2_CGROUP_ROOT", "/sys/fs/cgroup"))
+CORE2_AB_RESULTS = pathlib.Path(os.environ.get(
+    "QA_CORE2_AB_RESULTS", "/var/log/faultlab/ab.jsonl"))
 
 # security provenance: live process scan every cycle, file ownership less often.
 SECURITY_FILE_SCAN_S = int(os.environ.get("QA_SECURITY_FILE_SCAN_S", "300"))

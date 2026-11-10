@@ -74,4 +74,9 @@ subject fields before transmission.
 | LSM runs | `lsm` | `lsm.run` |
 | ticket drafts | `ticket` | `ticket.draft` |
 
+Core-2 findings travel as ordinary findings: `core2.isolation.*`,
+`core2.retired.online`, `core2.lab.*`, `core2.irq.affinity` and the
+`core2.ab.*` fault-lab verdicts. The receiving QA SIEM ships matching
+thresholds in `config/siem.rules.json`.
+
 See the QA SIEM repository `docs/INTEGRATION.md` for the receiving side.

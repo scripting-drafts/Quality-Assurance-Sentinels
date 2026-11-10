@@ -137,6 +137,36 @@ the database or printed.
 }
 ```
 
+## Core-2 isolation policy
+
+The hardware sources above cover error counters. A separate layer-1 check
+covers the policy that keeps the degrading core out of normal work.
+
+`/etc/faultlab/mode` selects `retired` (CPUs 2 and 8 offlined) or `lab`
+(online, isolated, cgroup-fenced). `QA_CORE2_ENFORCE=lab|retired|off` overrides
+it; `auto` follows the file. The check runs every cycle and emits:
+
+| Rule | Severity | Meaning |
+|---|---|---|
+| `core2.retired.online` | critical | mode says retired, CPUs still online |
+| `core2.isolation.unfenced` | critical | `system.slice`/`user.slice` cpuset still includes 2/8 |
+| `core2.isolation.missing` | warning | boot parameters or sysfs isolation incomplete |
+| `core2.lab.offline` | warning | lab mode but the CPUs are offline |
+| `core2.lab.slice_missing` | warning | `faultlab.slice` absent or without 2/8 |
+| `core2.irq.affinity` | warning | IRQ affinity still includes core 2 |
+| `core2.topology.changed` / `.absent` | warning | core 2 no longer maps to 2,8 |
+| `core2.ab.divergence` | critical | fault-lab A/B outputs differ |
+| `core2.ab.hw_suspect` | warning | faulty core failed where the control passed |
+| `core2.ab.control_unstable` | warning | the control core is unreliable |
+
+`faultlab-ab` appends one JSON object per verdict to
+`/var/log/faultlab/ab.jsonl`; the cycle consumes new lines from a persisted
+byte cursor, so restarts do not replay old results. MCE/EDAC events keep their
+existing `kernel.hardware`, `hardware.edac.ue` and `hardware.edac.ce` rules.
+
+Environment: `QA_CORE2_ENABLE`, `QA_CORE2_ENFORCE`, `QA_CORE2_MODE_FILE`,
+`QA_CORE2_CPU_ROOT`, `QA_CORE2_CGROUP_ROOT`, `QA_CORE2_AB_RESULTS`.
+
 ## Limits
 
 - SMART/NVMe, IPMI, PCM, turbostat and uncore often need privileges. This

@@ -62,6 +62,20 @@ The rules log every `execve` and setuid/setgid/capset event under the keys
 via the `adm` group). If auditd is absent, the scanner raises
 `security.audit_unavailable` rather than claiming complete coverage.
 
+## Read-only query engine
+
+The desktop Database window uses `qa query`. It opens `sentinels.db` with `mode=ro` and
+`PRAGMA query_only=ON`, accepts one statement only, and rejects everything that
+is not `SELECT`, `WITH` or `EXPLAIN`. A SQLite authorizer denies writes,
+`PRAGMA`, `ATTACH` and other non-read actions. Queries are bounded by an
+8-second deadline, a row limit, and per-cell truncation. The dashboard passes
+SQL as a single argv item; it never opens the database itself.
+
+```bash
+./bin/qa query --category inbox
+./bin/qa query --json --sql "SELECT severity, count(*) FROM findings GROUP BY severity"
+```
+
 ## Limits
 
 - Snapshot rules can miss short-lived processes; auditd closes that gap.

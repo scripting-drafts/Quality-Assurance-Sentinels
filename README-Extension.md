@@ -9,6 +9,7 @@ All commands use `./bin/qa <command>` from the repository root.
 | Setup and operations | `install.sh`, `uninstall.sh`, `init`, `compat`, `preflight`, `status`, `install-cron`, `posture` | Install or remove one/both layers, initialize, check Ubuntu upgrade compatibility, inspect prerequisites, check scheduling and security posture |
 | Routine collection | `cycle` (`tick`, `layer1`; `phase1` legacy), `sample`, `ingest`, `inventory`, `report` | Capture system state and run every due layer-1 duty |
 | Failure investigation | `boots`, `shutdown`, `findings`, `triage`, `correlate`, `trace`, `holds` | Examine restarts, boot and shutdown-window errors, events, their relationships, and held/outdated packages |
+| Query engine | `query` | Read-only category views or one `SELECT`/`WITH`/`EXPLAIN` statement against `sentinels.db` |
 | Hardware health | `hardware` | Collect RAS/EDAC/AER/APEI, SMART/NVMe, GPU, BMC, sensors, turbostat/PCM/uncore, vendor logs |
 | Linux Security Modules | `lsm` | Monitor AppArmor, SELinux, Smack, TOMOYO, Yama, lockdown, IMA, BPF, drift and denials |
 | Security provenance | `security` | Detect unexpected user/root code execution, root-owned state, and audit coverage gaps |
@@ -23,6 +24,10 @@ Useful examples:
 ```bash
 ./bin/qa compat --strict
 ./bin/qa report --kind daily --hours 24
+./bin/qa query --category inbox
+./bin/qa query --category findings --search systemd.service_start --severity error
+./bin/qa query --latest-cycle
+./bin/qa query --json --sql "SELECT severity, count(*) AS n FROM findings GROUP BY severity"
 ./bin/qa crosscheck --deep
 ./bin/qa notify --test
 ./bin/qa logs --all-layers -f

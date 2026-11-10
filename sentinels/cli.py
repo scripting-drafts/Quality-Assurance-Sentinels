@@ -7,6 +7,7 @@ import os
 import pathlib
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -14,8 +15,8 @@ from datetime import datetime
 
 from . import (
     boot, compat, config, correlate, crosscheck, db, deep, detect, evidence, hardware,
-    holds, ingest, inventory, logs, lsm, notify, posture, raise_ticket, report, sampler,
-    security, shutdown, siem, tickets, trace, triage,
+    holds, ingest, inventory, logs, lsm, notify, posture, query, raise_ticket, report,
+    sampler, security, shutdown, siem, tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
 
@@ -178,6 +179,50 @@ def cmd_findings(args) -> int:
             print(f"      {row['detail'][:140]}")
         if not rows:
             print("no findings")
+    return 0
+
+
+def cmd_query(args) -> int:
+    if args.list_categories:
+        print(json.dumps({"categories": query.catalog()}, indent=2))
+        return 0
+    conn = None
+    try:
+        conn = db.connect_readonly()
+        if args.latest_cycle:
+            result = query.latest_cycle(conn)
+        elif args.sql:
+            if args.search or args.severity or args.status or args.since:
+                raise query.QueryError(
+                    "filters apply to categories, not custom SQL")
+            result = query.run_sql(conn, args.sql, limit=args.limit)
+        else:
+            result = query.run_category(
+                conn, args.category, limit=args.limit,
+                search=args.search, severity=args.severity,
+                status=args.status, since=args.since)
+    except query.QueryError as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"qa query: {exc}", file=sys.stderr)
+        return 2
+    except (sqlite3.Error, OSError) as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)[:300]}))
+        else:
+            print(f"qa query: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if args.json:
+        print(json.dumps(result, default=str))
+    elif args.latest_cycle:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(query.format_table(result))
     return 0
 
 
@@ -1226,10 +1271,14 @@ def cmd_cycle(args) -> int:
                 counts: dict[str, int] = {}
                 for finding in new_findings:
                     counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
+                cycle_ts = iso()
                 result["layer1_findings"] = {
+                    "ts": cycle_ts,
                     "new": len(new_findings), "by_severity": counts,
                     "rules": [f["rule"] for f in new_findings][:20],
+                    "ids": [f["id"] for f in new_findings if f.get("id") is not None],
                 }
+                db.record_cycle_findings(conn, cycle_ts, new_findings)
                 from . import report as report_mod
 
                 report_mod.append_journal(
@@ -1515,6 +1564,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("phase1", help="legacy alias for cycle")
     s.set_defaults(func=cmd_cycle)
+
+    s = sub.add_parser(
+        "query",
+        help="read-only sentinels.db query engine for the inbox and SQL work",
+    )
+    s.add_argument(
+        "--category", choices=query.CATEGORY_ORDER, default="inbox",
+        help="main inbox category (default: inbox)")
+    s.add_argument("--sql", help="one read-only SELECT/WITH/EXPLAIN statement")
+    s.add_argument("--search", help="filter rule, subject, detail or fingerprint")
+    s.add_argument(
+        "--severity", help="comma-separated severity filter: critical,error,warning,info")
+    s.add_argument(
+        "--status", help="comma-separated finding status: open,investigating,resolved,dismissed")
+    s.add_argument("--since", help="ISO UTC lower bound, e.g. 2026-11-10T08:00:00Z")
+    s.add_argument("--latest-cycle", action="store_true",
+                   help="newest cycle summary and newest cycle that created findings")
+    s.add_argument("--limit", type=int, default=query.DEFAULT_LIMIT,
+                   help=f"maximum rows (1-{query.MAX_LIMIT}, default {query.DEFAULT_LIMIT})")
+    s.add_argument("--json", action="store_true", help="emit JSON for the dashboard")
+    s.add_argument("--list-categories", action="store_true",
+                   help="list the available inbox categories as JSON")
+    s.set_defaults(func=cmd_query)
 
     s = sub.add_parser("findings", help="list layer-1 findings and update their status")
     s.add_argument("--limit", type=int, default=50)

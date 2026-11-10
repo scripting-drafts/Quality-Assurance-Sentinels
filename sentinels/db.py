@@ -223,6 +223,16 @@ CREATE TABLE IF NOT EXISTS findings (
     evidence_path TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_findings_ts ON findings(ts);
+CREATE TABLE IF NOT EXISTS cycle_findings (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    finding_id INTEGER NOT NULL,
+    rule TEXT,
+    severity TEXT,
+    subject TEXT,
+    UNIQUE(ts, finding_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cycle_findings_ts ON cycle_findings(ts);
 CREATE TABLE IF NOT EXISTS deep_runs (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -255,6 +265,17 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
+def connect_readonly() -> sqlite3.Connection:
+    """Open sentinels.db without write permission for the query engine."""
+    config.ensure_dirs()
+    uri = f"file:{config.DB_PATH}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
@@ -316,3 +337,26 @@ def record_run(conn, task: str, ok: bool, detail: str = "") -> None:
         "INSERT INTO runs(ts, task, ok, detail) VALUES(?,?,?,?)",
         (iso(), task, 1 if ok else 0, detail[:2000]),
     )
+
+
+def record_cycle_findings(conn, ts: str, findings: list[dict]) -> int:
+    """Persist the findings newly created by one cycle for the Inbox."""
+    rows = [
+        (
+            ts,
+            int(finding["id"]),
+            finding.get("rule"),
+            finding.get("severity"),
+            finding.get("subject"),
+        )
+        for finding in findings
+        if finding.get("id") is not None
+    ]
+    if not rows:
+        return 0
+    conn.executemany(
+        "INSERT OR IGNORE INTO cycle_findings(ts, finding_id, rule, severity, subject) "
+        "VALUES(?,?,?,?,?)",
+        rows,
+    )
+    return len(rows)

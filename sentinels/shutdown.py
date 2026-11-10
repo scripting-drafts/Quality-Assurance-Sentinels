@@ -92,7 +92,7 @@ def _unit(entry: dict) -> str:
     unit = entry.get("_SYSTEMD_UNIT") or ""
     if not unit and entry.get("SYSLOG_IDENTIFIER"):
         unit = f"ident:{entry['SYSLOG_IDENTIFIER']}"
-    return str(unit)[:200]
+    return str(unit)
 
 
 def _source(entry: dict) -> str:
@@ -204,7 +204,7 @@ def _redact_message(msg: str, mode: str) -> str:
     if mode == "collapsed":
         text = _URL_RE.sub("<url>", text)
         text = _PATH_RE.sub("<path>", text)
-    return text[:1000]
+    return text
 
 
 def _match(entry: dict, phase: str = "shutdown", mode: str | None = None) -> dict | None:
@@ -470,7 +470,7 @@ def replay(conn) -> int:
                 continue
             ts = str(item.get("ts") or record.get("captured_ts") or iso())
             last_ts = str(item.get("last_ts") or ts)
-            unit = str(item.get("unit") or "")[:200]
+            unit = str(item.get("unit") or "")
             source = str(item.get("source") or "journal")
             fingerprint = str(item.get("fingerprint") or "")
             if not fingerprint:
@@ -490,9 +490,9 @@ def replay(conn) -> int:
                     unit,
                     None,
                     None,
-                    msg[:4000],
+                    msg,
                     fingerprint,
-                    json.dumps(item, sort_keys=True)[:20000],
+                    json.dumps(item, sort_keys=True),
                     count,
                     last_ts,
                 ),

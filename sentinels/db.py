@@ -335,7 +335,7 @@ def record_run(conn, task: str, ok: bool, detail: str = "") -> None:
 
     conn.execute(
         "INSERT INTO runs(ts, task, ok, detail) VALUES(?,?,?,?)",
-        (iso(), task, 1 if ok else 0, detail[:2000]),
+        (iso(), task, 1 if ok else 0, detail),
     )
 
 

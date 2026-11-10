@@ -169,7 +169,7 @@ def _pstore_archives(last_ts: str | None) -> list[dict]:
             if hits:
                 # The archive is a new evidence source; redact it like the
                 # journal before it reaches the database or a detail view.
-                item["panic"] = redact(hits[-1])[:500]
+                item["panic"] = redact(hits[-1])
         found.append(item)
     return found
 
@@ -331,7 +331,7 @@ def scan_boot(boot: dict, refresh: bool = False) -> dict:
         scans[key] = {
             "label": label,
             "count": int(summary.get("count") or len(items)),
-            "sample": [str(e.get("message") or "")[:300] for e in items[:3]],
+            "sample": [str(e.get("message") or "") for e in items[:3]],
         }
         if summary.get("start"):
             scans[key]["window_start"] = summary["start"]
@@ -346,8 +346,8 @@ def scan_boot(boot: dict, refresh: bool = False) -> dict:
         "span": boot["span"],
         "last_ts": last_ts,
         "ended_clean": 1 if clean else 0,
-        "markers": "\n".join(ln for ln in tail.splitlines() if SHUTDOWN_RE.search(ln))[:2000],
-        "last_message": (lines[-1][:2000] if lines else ""),
+        "markers": "\n".join(ln for ln in tail.splitlines() if SHUTDOWN_RE.search(ln)),
+        "last_message": (lines[-1] if lines else ""),
         "scans": json.dumps(scans, sort_keys=True),
     }
     record.update(_crash_capture_state(archives))

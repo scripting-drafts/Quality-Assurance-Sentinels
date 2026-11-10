@@ -101,12 +101,12 @@ def ingest_journal(conn) -> int:
                 entry.get("_BOOT_ID"),
                 source,
                 sev,
-                unit[:200],
+                unit,
                 pid,
                 entry.get("_COMM"),
-                msg[:4000],
+                msg,
                 fp,
-                json.dumps(entry, default=str)[:20000],
+                json.dumps(entry, default=str),
                 ts_s,
             ),
         )
@@ -209,8 +209,6 @@ def ingest_coredumps(conn, days: int = 30) -> int:
             ["coredumpctl", "info", str(pid), "--no-pager"], timeout=45
         )
         info = info_out if info_rc == 0 else ""
-        if len(info) > 20000:
-            info = info[:20000] + "\n... truncated ..."
         context = _journal_context(dt.timestamp())
 
         conn.execute(
@@ -226,7 +224,7 @@ def ingest_coredumps(conn, days: int = 30) -> int:
                 corefile,
                 (",".join(map(str, sorted(mask))) if mask else None),
                 verdict,
-                (f"size={size}\n" + info + "\n--- journal context ---\n" + context)[:40000],
+                f"size={size}\n" + info + "\n--- journal context ---\n" + context,
                 fp,
             ),
         )

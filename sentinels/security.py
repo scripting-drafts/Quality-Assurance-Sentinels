@@ -216,7 +216,7 @@ def _finding(proc: dict, rule: str, severity: str, detail: str) -> dict:
         "rule": rule,
         "severity": severity,
         "subject": f"{proc.get('comm') or 'unknown'}[{proc.get('pid')}]",
-        "detail": redact(detail)[:1500],
+        "detail": redact(detail),
         "case_id": None,
     }
 
@@ -527,7 +527,7 @@ def parse_audit_line(line: str, policy: dict, default_ts: str | None = None) -> 
         "rule": rule,
         "severity": severity,
         "subject": subject,
-        "detail": redact(detail)[:1500],
+        "detail": redact(detail),
         "case_id": None,
     }
 

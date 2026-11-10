@@ -43,7 +43,7 @@ def _candidate_from_crash(row) -> dict:
         "verdict": _crash_verdict(row["core2_involved"]),
         "process": proc,
         "signature": f"{proc} {row['sig']}",
-        "detail": (row["context"] or "")[:8000],
+        "detail": row["context"] or "",
         "affinity": row["cpus_allowed"] or "unknown",
         "event_ts": row["ts"],
     }
@@ -57,7 +57,7 @@ def _candidate_from_event(row) -> dict:
         "verdict": "suspected",
         "process": unit or "kernel",
         "signature": (row["message"] or "")[:160],
-        "detail": (row["message"] or "")[:8000],
+        "detail": row["message"] or "",
         "affinity": "n/a (journal event)",
         "event_ts": row["ts"],
     }

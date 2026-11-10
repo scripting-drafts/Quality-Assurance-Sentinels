@@ -585,7 +585,7 @@ def write_report(conn, kind: str = "daily", hours: int = 24) -> dict:
     )
     conn.execute(
         "INSERT INTO reports(ts, kind, path, summary) VALUES(?,?,?,?)",
-        (iso(), kind, str(path), summary[:500]),
+        (iso(), kind, str(path), summary),
     )
     return {"title": title, "path": str(path), "body": body, "summary": summary}
 

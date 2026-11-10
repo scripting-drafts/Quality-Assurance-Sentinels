@@ -164,7 +164,7 @@ def _event_findings(conn, since: str) -> list[dict]:
                     "rule": rule,
                     "severity": severity,
                     "subject": unit or "kernel",
-                    "detail": msg[:1500],
+                    "detail": msg,
                     "count": int(row["count"] or 1),
                     "case_id": _case_id(conn, unit, msg),
                 }
@@ -174,7 +174,7 @@ def _event_findings(conn, since: str) -> list[dict]:
                     item["last_ts"], row["last_ts"] or row["ts"]
                 )
                 item["count"] += int(row["count"] or 1)
-                item["detail"] = msg[:1500]
+                item["detail"] = msg
                 item["subject"] = unit or item["subject"]
             continue
         out.append(
@@ -185,14 +185,14 @@ def _event_findings(conn, since: str) -> list[dict]:
                 "rule": rule,
                 "severity": severity,
                 "subject": unit or "kernel",
-                "detail": msg[:1500],
+                "detail": msg,
                 "case_id": _case_id(conn, unit, msg),
             }
         )
     for item in grouped.values():
         item["detail"] = (
             f"{item['detail']} ({item['count']} occurrence(s) in window)"
-        )[:1500]
+        )
         item.pop("count", None)
         out.append(item)
     return out

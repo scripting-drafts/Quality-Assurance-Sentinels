@@ -103,7 +103,7 @@ def clusters_for_boot(conn, boot: dict) -> list[dict]:
         signature = classify.signature(message)
         bump(
             vendor, component, signature,
-            row["ts"], {"message": message[:1000],
+            row["ts"], {"message": message,
                         "unit": row.get("unit"), "severity": row.get("severity")},
             int(row.get("count") or 1), False,
             _display_text(message, signature),

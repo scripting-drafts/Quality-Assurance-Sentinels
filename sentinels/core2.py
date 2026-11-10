@@ -210,7 +210,7 @@ def _finding(rule: str, severity: str, subject: str, detail: str,
         "rule": rule,
         "severity": severity,
         "subject": subject,
-        "detail": redact(detail)[:1500],
+        "detail": redact(detail),
         "case_id": None,
     }
 

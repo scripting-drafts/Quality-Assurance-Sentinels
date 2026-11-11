@@ -94,6 +94,16 @@ class QueryEngineTests(unittest.TestCase):
             self._conn(), "findings", limit=10, search="%")
         self.assertEqual(result["count"], 0)
 
+    def test_status_filter_requires_every_selected_value(self):
+        conn = self._conn()
+        single = query.run_category(conn, "findings", limit=10, status="open")
+        self.assertGreater(single["count"], 0)
+        self.assertIn("status = 'open'", single["sql"])
+        combined = query.run_category(
+            conn, "findings", limit=10, status="open,resolved")
+        self.assertEqual(combined["count"], 0)
+        self.assertIn("status = 'open' AND status = 'resolved'", combined["sql"])
+
     def test_cycle_summary_and_latest_new(self):
         conn = self._conn()
         detail = json.dumps({

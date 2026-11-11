@@ -446,7 +446,8 @@ def _finding_sql(
         clauses.append(f"severity IN ({_placeholder_list(severity)})")
         params.extend(severity)
     if status:
-        clauses.append(f"status IN ({_placeholder_list(status)})")
+        clauses.append(
+            "(" + " AND ".join("status = ?" for _ in status) + ")")
         params.extend(status)
     if since:
         clauses.append("ts >= ?")

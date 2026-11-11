@@ -1,0 +1,1366 @@
+#!/usr/bin/env python3
+"""Live attribution for Secret Service D-Bus calls.
+
+Watches session-bus method calls into the Secret Service API and records who
+made them: PID, process, user, session, cgroup, namespaces, executable hash,
+ELF build-id, security label, owned bus names, and remote addresses where the
+session is remote.
+
+Privacy rule: D-Bus message bodies are never parsed, persisted, or printed.
+Only the message envelope and process/session identifiers are written.  The
+caller's environment is read through a strict whitelist (display/session/SSH
+variables), never dumped.  The log is host-local, mode 0600, and is not part
+of QA-Sentinels evidence bundles or SIEM forwarding.
+
+Output: var/keyring-access.log  (JSONL, hash-chained)
+        var/keyring-access.state (chain state across rotation)
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import pwd
+import re
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+
+try:
+    import dbus
+    import dbus.mainloop.glib
+    from gi.repository import GLib
+except ImportError as exc:  # pragma: no cover - host package check
+    sys.stderr.write(
+        "keyring-watch needs python3-dbus and python3-gi "
+        f"(apt install python3-dbus python3-gi): {exc}\n"
+    )
+    raise SystemExit(2)
+
+VERSION = "1.0"
+SCHEMA = "qa-keyring-access/1"
+ROOT = Path(os.environ.get("QA_SENTINELS_HOME", Path(__file__).resolve().parent.parent))
+VAR = ROOT / "var"
+DEFAULT_LOG = VAR / "keyring-access.log"
+DEFAULT_STATE = VAR / "keyring-access.state"
+MAX_BYTES = 50 * 1024 * 1024
+BACKUPS = 5
+
+SECRET_DESTS = {
+    "org.freedesktop.secrets",
+    "org.freedesktop.portal.Secret",
+    "org.freedesktop.impl.portal.Secret",
+}
+SECRET_PATH_PREFIX = "/org/freedesktop/secrets"
+SECRET_IFACE_PREFIX = "org.freedesktop.Secret."
+PORTAL_SECRET_IFACES = {
+    "org.freedesktop.portal.Secret",
+    "org.freedesktop.impl.portal.Secret",
+}
+
+MATCH_RULES = [
+    "type='method_call',destination='org.freedesktop.secrets'",
+    f"type='method_call',path_namespace='{SECRET_PATH_PREFIX}'",
+    "type='method_call',destination='org.freedesktop.portal.Secret'",
+    "type='method_call',destination='org.freedesktop.impl.portal.Secret'",
+    "type='method_call',interface='org.freedesktop.portal.Secret'",
+    "type='method_call',interface='org.freedesktop.impl.portal.Secret'",
+]
+
+HEADER_RE = re.compile(
+    r"^method call time=(\d+(?:\.\d+)?) sender=(\S+) -> destination=(\S+) "
+    r"serial=(\d+) path=(\S+); interface=(\S+); member=(\S+)\s*$"
+)
+NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+HZ = os.sysconf("SC_CLK_TCK")
+BOOT_ID = ""
+try:
+    BOOT_ID = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+except OSError:
+    pass
+
+USER_CACHE: dict[int, str] = {}
+USER_LOCK = threading.Lock()
+SESSION_CACHE: dict[str, tuple[float, dict]] = {}
+FINGERPRINT_CACHE: dict[tuple, dict] = {}
+FINGERPRINT_LOCK = threading.Lock()
+
+ENV_KEYS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_SESSION_ID",
+    "XDG_SESSION_TYPE",
+    "XDG_SESSION_DESKTOP",
+    "XDG_CURRENT_DESKTOP",
+    "SSH_CLIENT",
+    "SSH_CONNECTION",
+    "SSH_TTY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "GIO_LAUNCHED_DESKTOP_FILE",
+)
+
+
+def utc_iso(ts: float | None = None) -> str:
+    value = dt.datetime.fromtimestamp(time.time() if ts is None else ts, dt.timezone.utc)
+    return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def read_text(path: str | Path, limit: int = 65536) -> str | None:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def read_bytes(path: str | Path, limit: int = 131072) -> bytes | None:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(limit)
+    except OSError:
+        return None
+
+
+def username(uid: int) -> str | None:
+    with USER_LOCK:
+        if uid not in USER_CACHE:
+            try:
+                USER_CACHE[uid] = pwd.getpwuid(uid).pw_name
+            except KeyError:
+                USER_CACHE[uid] = ""
+        return USER_CACHE[uid] or None
+
+
+def boot_seconds() -> float:
+    text = read_text("/proc/stat", 8192) or ""
+    for line in text.splitlines():
+        if line.startswith("btime "):
+            try:
+                return float(line.split()[1])
+            except (IndexError, ValueError):
+                break
+    return 0.0
+
+
+def bus_info(address: str) -> dict:
+    """Describe the bus transport and any network endpoints it exposes."""
+    first = address.split(";", 1)[0]
+    info = {
+        "address": first,
+        "transport": None,
+        "path": None,
+        "remote_ip": None,
+        "remote_ips": [],
+        "remote_port": None,
+    }
+    if first.startswith("unix:"):
+        info["transport"] = "unix"
+        for part in first[5:].split(","):
+            if part.startswith("path="):
+                info["path"] = part[5:]
+            elif part.startswith("abstract="):
+                info["path"] = "@" + part[9:]
+        return info
+    for prefix in ("tcp:", "nonce-tcp:"):
+        if first.startswith(prefix):
+            info["transport"] = prefix[:-1]
+            fields = dict(
+                part.split("=", 1) for part in first[len(prefix):].split(",") if "=" in part
+            )
+            host = fields.get("host", "")
+            port = fields.get("port", "")
+            try:
+                info["remote_port"] = int(port)
+            except ValueError:
+                pass
+            if host:
+                try:
+                    answers = socket.getaddrinfo(host, port or None, type=socket.SOCK_STREAM)
+                    ips = []
+                    for answer in answers:
+                        ip = answer[4][0]
+                        if ip not in ips:
+                            ips.append(ip)
+                    info["remote_ips"] = ips
+                    info["remote_ip"] = ips[0] if ips else host
+                except OSError:
+                    info["remote_ip"] = host
+            break
+    if info["transport"] is None:
+        info["transport"] = first.split(":", 1)[0] or "unknown"
+    return info
+
+
+BUS_ADDRESS = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").split(";", 1)[0]
+if not BUS_ADDRESS:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    BUS_ADDRESS = f"unix:path={runtime}/bus"
+    os.environ["DBUS_SESSION_BUS_ADDRESS"] = BUS_ADDRESS
+BUS_INFO = bus_info(BUS_ADDRESS)
+
+
+def parse_ssh(env: dict[str, str]) -> dict | None:
+    raw = env.get("SSH_CONNECTION") or ""
+    parts = raw.split()
+    if len(parts) == 4:
+        try:
+            return {
+                "source": "SSH_CONNECTION",
+                "client_ip": parts[0],
+                "client_port": int(parts[1]),
+                "server_ip": parts[2],
+                "server_port": int(parts[3]),
+                "ip": parts[0],
+            }
+        except ValueError:
+            pass
+    raw = env.get("SSH_CLIENT") or ""
+    parts = raw.split()
+    if len(parts) >= 3:
+        try:
+            return {
+                "source": "SSH_CLIENT",
+                "client_ip": parts[0],
+                "client_port": int(parts[1]),
+                "server_ip": parts[2],
+                "server_port": None,
+                "ip": parts[0],
+            }
+        except ValueError:
+            pass
+    return None
+
+
+def logind_session(session_id: str) -> dict | None:
+    now = time.monotonic()
+    cached = SESSION_CACHE.get(session_id)
+    if cached and now - cached[0] < 60.0:
+        return dict(cached[1])
+    fields = (
+        "Id", "User", "Name", "Seat", "Type", "Class", "Remote",
+        "RemoteHost", "TTY", "Display", "Active", "State",
+    )
+    cmd = ["loginctl", "show-session", str(session_id)]
+    for field in fields:
+        cmd += ["-p", field]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=1.5, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    data: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            data[key] = value
+    SESSION_CACHE[session_id] = (now, data)
+    return dict(data)
+
+
+def read_status(pid: int) -> dict[str, str]:
+    text = read_text(f"/proc/{pid}/status", 32768) or ""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            out[key] = value.strip()
+    return out
+
+
+def read_cmdline(pid: int) -> list[str]:
+    raw = read_bytes(f"/proc/{pid}/cmdline", 65536) or b""
+    parts = raw.split(b"\0")
+    if parts and parts[-1] == b"":
+        parts.pop()
+    return [part.decode("utf-8", "replace")[:512] for part in parts[:64]]
+
+
+def redact_cmdline(argv: list[str]) -> list[str]:
+    """Keep the command shape but never persist obvious credentials."""
+    sensitive = re.compile(
+        r"(?i)^-{1,2}(?:password|passwd|pass|token|secret|api[-_]?key|auth|"
+        r"credential|bearer|private[-_]?key)$"
+    )
+    inline = re.compile(
+        r"(?i)^(-{1,2}(?:password|passwd|pass|token|secret|api[-_]?key|auth|"
+        r"credential|bearer|private[-_]?key))=(.*)$"
+    )
+    out: list[str] = []
+    hide_next = False
+    for arg in argv:
+        if hide_next:
+            out.append("<redacted>")
+            hide_next = False
+            continue
+        match = inline.match(arg)
+        if match:
+            out.append(match.group(1) + "=<redacted>")
+        elif sensitive.match(arg):
+            out.append(arg)
+            hide_next = True
+        else:
+            out.append(arg)
+    return out
+
+
+def read_environ(pid: int) -> dict[str, str]:
+    raw = read_bytes(f"/proc/{pid}/environ", 131072) or b""
+    values: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        name = key.decode("ascii", "replace")
+        if name in ENV_KEYS:
+            values[name] = value.decode("utf-8", "replace")[:512]
+    return values
+
+
+def read_namespaces(pid: int) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for name in ("cgroup", "ipc", "mnt", "net", "pid", "user", "uts"):
+        try:
+            target = os.readlink(f"/proc/{pid}/ns/{name}")
+        except OSError:
+            continue
+        match = re.search(r"\[(\d+)\]", target)
+        if match:
+            out[name] = int(match.group(1))
+    return out
+
+
+def read_cgroup(pid: int) -> list[str]:
+    text = read_text(f"/proc/{pid}/cgroup", 16384) or ""
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def parse_stat(pid: int) -> dict:
+    text = read_text(f"/proc/{pid}/stat", 8192) or ""
+    close = text.rfind(")")
+    if close < 0:
+        return {}
+    rest = text[close + 2:].split()
+    if len(rest) < 20:
+        return {}
+    try:
+        return {
+            "state": rest[0],
+            "ppid": int(rest[1]),
+            "tty_nr": int(rest[4]),
+            "start_ticks": int(rest[19]),
+        }
+    except (ValueError, IndexError):
+        return {}
+
+
+def parse_notes(data: bytes, endian: str) -> str | None:
+    offset = 0
+    while offset + 12 <= len(data):
+        namesz, descsz, ntype = struct.unpack_from(endian + "III", data, offset)
+        offset += 12
+        name = data[offset:offset + namesz]
+        offset += (namesz + 3) & ~3
+        desc = data[offset:offset + descsz]
+        offset += (descsz + 3) & ~3
+        if ntype == 3 and name.rstrip(b"\0").startswith(b"GNU") and desc:
+            return desc.hex()
+        if offset > len(data):
+            break
+    return None
+
+
+def elf_build_id(path: str) -> str | None:
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(64)
+            if len(header) < 52 or header[:4] != b"\x7fELF":
+                return None
+            eclass = header[4]
+            edata = header[5]
+            endian = "<" if edata == 1 else ">"
+            if eclass == 2:
+                if len(header) < 64:
+                    return None
+                phoff = struct.unpack_from(endian + "Q", header, 32)[0]
+                phentsize = struct.unpack_from(endian + "H", header, 54)[0]
+                phnum = struct.unpack_from(endian + "H", header, 56)[0]
+                phfmt = endian + "IIQQQQQQ"
+            elif eclass == 1:
+                phoff = struct.unpack_from(endian + "I", header, 28)[0]
+                phentsize = struct.unpack_from(endian + "H", header, 42)[0]
+                phnum = struct.unpack_from(endian + "H", header, 44)[0]
+                phfmt = endian + "IIIIIIII"
+            else:
+                return None
+            for index in range(min(phnum, 512)):
+                handle.seek(phoff + index * phentsize)
+                raw = handle.read(phentsize)
+                if len(raw) < struct.calcsize(phfmt):
+                    continue
+                fields = struct.unpack_from(phfmt, raw, 0)
+                if fields[0] != 4:  # PT_NOTE
+                    continue
+                if eclass == 2:
+                    note_off, note_size = fields[2], fields[5]
+                else:
+                    note_off, note_size = fields[1], fields[4]
+                if note_size <= 0 or note_size > (1 << 20):
+                    continue
+                handle.seek(note_off)
+                build_id = parse_notes(handle.read(note_size), endian)
+                if build_id:
+                    return build_id
+    except (OSError, struct.error, ValueError):
+        return None
+    return None
+
+
+def file_fingerprint(path: str | None) -> dict | None:
+    if not path:
+        return None
+    try:
+        resolved = os.path.realpath(path)
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (resolved, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    with FINGERPRINT_LOCK:
+        cached = FINGERPRINT_CACHE.get(key)
+    if cached:
+        return dict(cached)
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        return None
+    value = {
+        "exe_sha256": digest.hexdigest(),
+        "build_id": elf_build_id(path),
+        "exe_size": st.st_size,
+        "exe_mtime_ns": st.st_mtime_ns,
+        "exe_inode": st.st_ino,
+        "exe_device": st.st_dev,
+    }
+    with FINGERPRINT_LOCK:
+        FINGERPRINT_CACHE[key] = dict(value)
+    return value
+
+
+def snapshot_pid(pid: int, with_fingerprint: bool = False) -> dict:
+    """Read a caller's identity from /proc without touching its memory."""
+    base: dict = {"pid": int(pid), "alive": True, "zombie": False}
+    status = read_status(pid)
+    if not status:
+        return {"pid": int(pid), "alive": False, "zombie": False}
+    stat = parse_stat(pid)
+    zombie = stat.get("state") == "Z"
+    base["zombie"] = zombie
+    base["alive"] = not zombie
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        exe = None
+    try:
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        cwd = None
+    try:
+        root = os.readlink(f"/proc/{pid}/root")
+    except OSError:
+        root = None
+    ppid = stat.get("ppid")
+    parent = None
+    if ppid and os.path.isdir(f"/proc/{ppid}"):
+        try:
+            parent_exe = os.readlink(f"/proc/{ppid}/exe")
+        except OSError:
+            parent_exe = None
+        parent = {
+            "pid": ppid,
+            "comm": (read_text(f"/proc/{ppid}/comm", 256) or "").strip() or None,
+            "exe": parent_exe,
+        }
+    uid = euid = suid = fsuid = None
+    gid = egid = sgid = fsgid = None
+    groups: list[int] = []
+    if "Uid" in status:
+        vals = status["Uid"].split()
+        if len(vals) >= 4:
+            uid, euid, suid, fsuid = (int(v) for v in vals[:4])
+    if "Gid" in status:
+        vals = status["Gid"].split()
+        if len(vals) >= 4:
+            gid, egid, sgid, fsgid = (int(v) for v in vals[:4])
+    if "Groups" in status:
+        try:
+            groups = [int(v) for v in status["Groups"].split()]
+        except ValueError:
+            groups = []
+    audit_loginuid = None
+    raw = (read_text(f"/proc/{pid}/loginuid", 64) or "").strip()
+    if raw.isdigit() and int(raw) != 4294967295:
+        audit_loginuid = int(raw)
+    audit_sessionid = None
+    raw = (read_text(f"/proc/{pid}/sessionid", 64) or "").strip()
+    if raw.isdigit() and int(raw) != 4294967295:
+        audit_sessionid = int(raw)
+    label = (read_text(f"/proc/{pid}/attr/current", 4096) or "").strip() or None
+    cgroup = read_cgroup(pid)
+    cgroup_unit = None
+    if cgroup:
+        tail = cgroup[-1].split("::", 1)[-1]
+        parts = [part for part in tail.split("/") if part]
+        if parts:
+            cgroup_unit = parts[-1]
+    env = read_environ(pid)
+    session = None
+    session_id = env.get("XDG_SESSION_ID")
+    if session_id:
+        info = logind_session(session_id)
+        if info:
+            session = info
+    remote = parse_ssh(env)
+    if remote is None and session and session.get("Remote") == "yes":
+        host = session.get("RemoteHost") or ""
+        if host:
+            remote = {
+                "source": "logind",
+                "ip": host,
+                "client_ip": host,
+                "client_port": None,
+                "server_ip": None,
+                "server_port": None,
+            }
+    start_iso = None
+    if stat.get("start_ticks") is not None:
+        start_iso = utc_iso(boot_seconds() + stat["start_ticks"] / HZ)
+    tty = None
+    try:
+        tty_link = os.readlink(f"/proc/{pid}/fd/0")
+        if tty_link.startswith("/dev/"):
+            tty = tty_link
+    except OSError:
+        pass
+    base.update(
+        {
+            "boot_id": BOOT_ID,
+            "ppid": ppid,
+            "parent": parent,
+            "comm": (read_text(f"/proc/{pid}/comm", 256) or "").strip() or None,
+            "exe": exe,
+            "cwd": cwd,
+            "root": root,
+            "cmdline": redact_cmdline(read_cmdline(pid)),
+            "uid": uid,
+            "euid": euid,
+            "suid": suid,
+            "fsuid": fsuid,
+            "gid": gid,
+            "egid": egid,
+            "sgid": sgid,
+            "fsgid": fsgid,
+            "supplementary_groups": groups,
+            "user": username(uid) if uid is not None else None,
+            "start_time": start_iso,
+            "start_ticks": stat.get("start_ticks"),
+            "state": stat.get("state"),
+            "tty": tty,
+            "cgroup": cgroup,
+            "cgroup_unit": cgroup_unit,
+            "audit_loginuid": audit_loginuid,
+            "audit_sessionid": audit_sessionid,
+            "security_label": label,
+            "cap_eff": status.get("CapEff"),
+            "cap_prm": status.get("CapPrm"),
+            "cap_bnd": status.get("CapBnd"),
+            "no_new_privs": status.get("NoNewPrivs"),
+            "seccomp": status.get("Seccomp"),
+            "threads": status.get("Threads"),
+            "namespaces": read_namespaces(pid),
+            "environment": env,
+            "logind_session": session,
+            "remote_access": remote,
+        }
+    )
+    if with_fingerprint:
+        base["fingerprint"] = file_fingerprint(exe)
+    return base
+
+
+def capture_identity(connection: str, cred_bus) -> dict:
+    """Resolve a unique bus name to credentials and a /proc snapshot."""
+    connection = str(connection)
+    pid = None
+    creds: dict = {}
+    errors: list[str] = []
+    try:
+        pid = int(
+            cred_bus.call_blocking(
+                "org.freedesktop.DBus",
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                "GetConnectionUnixProcessID",
+                "s",
+                (connection,),
+                timeout=1.0,
+            )
+        )
+    except Exception as exc:  # dbus exceptions vary
+        errors.append(f"pid:{type(exc).__name__}")
+    try:
+        raw = cred_bus.call_blocking(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "GetConnectionCredentials",
+            "s",
+            (connection,),
+            timeout=1.0,
+        )
+        for key, value in raw.items():
+            key = str(key)
+            if key == "LinuxSecurityLabel":
+                try:
+                    value = bytes(int(item) for item in value).decode("utf-8", "replace")
+                except Exception:
+                    value = str(value)
+                value = value.rstrip("\x00")
+            elif key in ("ProcessID", "UnixUserID"):
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    value = str(value)
+            else:
+                value = str(value)
+            creds[key] = value
+        if pid is None and isinstance(creds.get("ProcessID"), int):
+            pid = creds["ProcessID"]
+    except Exception as exc:
+        errors.append(f"creds:{type(exc).__name__}")
+    identity = {
+        "connection": connection,
+        "pid": pid,
+        "credentials": creds,
+        "identity_source": "dbus-credentials+/proc",
+        "identity_errors": errors,
+    }
+    if pid and os.path.isdir(f"/proc/{pid}"):
+        identity.update(snapshot_pid(pid))
+    return identity
+
+
+class _IdentityEntry:
+    __slots__ = ("lock", "ready", "value", "stamp")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.ready = threading.Event()
+        self.value: dict | None = None
+        self.stamp = time.monotonic()
+
+
+class IdentityCache:
+    """Capture each bus connection once, so a second lookup waits instead of
+    racing an in-progress /proc snapshot (short-lived clients die fast)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: dict[str, _IdentityEntry] = {}
+
+    def get(self, name: str) -> dict | None:
+        with self._lock:
+            entry = self._items.get(name)
+        if entry and entry.ready.is_set() and entry.value is not None:
+            return dict(entry.value)
+        return None
+
+    def capture(self, name: str, cred_bus, capture_fn) -> dict:
+        with self._lock:
+            entry = self._items.get(name)
+            if entry is None:
+                entry = _IdentityEntry()
+                self._items[name] = entry
+        if entry.ready.is_set() and entry.value is not None:
+            return dict(entry.value)
+        with entry.lock:
+            if entry.ready.is_set() and entry.value is not None:
+                return dict(entry.value)
+            value = capture_fn(name, cred_bus)
+            entry.value = value
+            entry.stamp = time.monotonic()
+            entry.ready.set()
+            return dict(value)
+
+    def update(self, name: str, value: dict) -> None:
+        with self._lock:
+            entry = self._items.get(name)
+            if entry is None:
+                entry = _IdentityEntry()
+                self._items[name] = entry
+        entry.value = value
+        entry.stamp = time.monotonic()
+        entry.ready.set()
+
+    def prune(self, max_items: int = 5000) -> None:
+        with self._lock:
+            if len(self._items) <= max_items:
+                return
+            ordered = sorted(self._items.items(), key=lambda pair: pair[1].stamp)
+            for name, _ in ordered[: len(ordered) - max_items]:
+                self._items.pop(name, None)
+
+
+CACHE = IdentityCache()
+NAMES_LOCK = threading.Lock()
+NAMES_BY_OWNER: dict[str, set[str]] = {}
+
+
+def names_for(owner: str) -> list[str]:
+    with NAMES_LOCK:
+        return sorted(NAMES_BY_OWNER.get(owner, set()))[:64]
+
+
+def note_name_change(name: str, old: str, new: str) -> None:
+    if name.startswith(":"):
+        return
+    with NAMES_LOCK:
+        if old:
+            NAMES_BY_OWNER.get(old, set()).discard(name)
+        if new:
+            NAMES_BY_OWNER.setdefault(new, set()).add(name)
+
+
+class LogWriter:
+    def __init__(self, path: Path, state_path: Path) -> None:
+        self.path = path
+        self.state_path = state_path
+        self.lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._repair_tail()
+        self.prev = self._initial_prev()
+        self.fh = self._open()
+        self.records = 0
+
+    def _repair_tail(self) -> None:
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return
+        if size == 0:
+            return
+        with open(self.path, "rb+") as handle:
+            handle.seek(max(0, size - 65536))
+            tail = handle.read()
+            if tail.endswith(b"\n"):
+                return
+            cut = tail.rfind(b"\n")
+            handle.truncate(max(0, size - 65536) + cut + 1)
+
+    def _last_digest(self) -> str | None:
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return None
+        if size == 0:
+            return None
+        with open(self.path, "rb") as handle:
+            handle.seek(max(0, size - 65536))
+            tail = handle.read().decode("utf-8", "replace")
+        for line in reversed(tail.splitlines()):
+            if not line.strip():
+                continue
+            try:
+                return json.loads(line).get("record_sha256")
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    def _initial_prev(self) -> str:
+        last = self._last_digest()
+        if last:
+            return last
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            return str(state.get("prev_sha256") or "GENESIS")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return "GENESIS"
+
+    def _open(self):
+        handle = open(self.path, "a", encoding="utf-8")
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+        return handle
+
+    def _write_state(self) -> None:
+        tmp = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+        payload = json.dumps(
+            {"prev_sha256": self.prev, "updated": utc_iso()}, indent=2, sort_keys=True
+        )
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            tmp.write_text(payload + "\n", encoding="utf-8")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.state_path)
+        except OSError:
+            pass
+
+    def _rotate(self) -> None:
+        self.fh.flush()
+        try:
+            os.fsync(self.fh.fileno())
+        except OSError:
+            pass
+        self.fh.close()
+        self._write_state()
+        for index in range(BACKUPS - 1, 0, -1):
+            src = Path(str(self.path) + f".{index}")
+            dst = Path(str(self.path) + f".{index + 1}")
+            if src.exists():
+                try:
+                    os.replace(src, dst)
+                except OSError:
+                    pass
+        try:
+            os.replace(self.path, Path(str(self.path) + ".1"))
+        except OSError:
+            pass
+        self.fh = self._open()
+
+    def append(self, record: dict) -> dict:
+        with self.lock:
+            body = {key: value for key, value in record.items() if key != "record_sha256"}
+            body["prev_sha256"] = self.prev
+            canonical = json.dumps(
+                body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            body["record_sha256"] = digest
+            line = json.dumps(
+                body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            try:
+                if self.fh.tell() + len(line) + 1 > MAX_BYTES and self.fh.tell() > 0:
+                    self._rotate()
+            except OSError:
+                pass
+            self.fh.write(line + "\n")
+            self.fh.flush()
+            self.records += 1
+            self.prev = digest
+            return body
+
+    def close(self) -> None:
+        with self.lock:
+            self._write_state()
+            try:
+                self.fh.flush()
+                os.fsync(self.fh.fileno())
+            except OSError:
+                pass
+            try:
+                self.fh.close()
+            except OSError:
+                pass
+
+
+WRITER: LogWriter | None = None
+STOP = threading.Event()
+QUIET = False
+
+
+def collector_base(event: str, detail: dict | None = None) -> dict:
+    return {
+        "schema": SCHEMA,
+        "record_id": uuid.uuid4().hex,
+        "event": event,
+        "ts": utc_iso(),
+        "collector": {
+            "version": VERSION,
+            "pid": os.getpid(),
+            "uid": os.getuid(),
+            "boot_id": BOOT_ID,
+            "argv0": sys.argv[0],
+            "bus": BUS_INFO,
+        },
+        "detail": detail or {},
+    }
+
+
+def log_record(record: dict) -> None:
+    written = WRITER.append(record) if WRITER is not None else record
+    if QUIET or written.get("event") != "secret_service_call":
+        return
+    message = written.get("message", {})
+    caller = written.get("caller", {})
+    names = ",".join(written.get("owned_names") or []) or "-"
+    sys.stderr.write(
+        f"{written.get('ts')} pid={caller.get('pid')} uid={caller.get('uid')} "
+        f"comm={caller.get('comm')} exe={caller.get('exe')} names={names} "
+        f"{message.get('operation')} -> {message.get('destination')}\n"
+    )
+    sys.stderr.flush()
+
+
+def log_error(message: str, **extra) -> None:
+    detail = {"message": message[:800]}
+    detail.update(extra)
+    log_record(collector_base("collector_error", detail))
+
+
+def enrich_identity(identity: dict) -> dict:
+    result = dict(identity)
+    pid = result.get("pid")
+    if pid and os.path.isdir(f"/proc/{pid}"):
+        fresh = snapshot_pid(int(pid), with_fingerprint=True)
+        if fresh.get("alive"):
+            # A live refresh wins, but empty values must not erase the birth
+            # snapshot (a process may have closed its environment files).
+            for key, value in fresh.items():
+                if value not in (None, "", [], {}):
+                    result[key] = value
+            result["state"] = fresh.get("state")
+            result["alive"] = True
+            result["zombie"] = False
+        else:
+            # The PID now names a zombie or an exited process. Keep the good
+            # snapshot taken at connection birth and only record liveness.
+            result["state"] = fresh.get("state", result.get("state"))
+            result["alive"] = bool(fresh.get("alive"))
+            result["zombie"] = bool(fresh.get("zombie"))
+    if not result.get("fingerprint"):
+        result["fingerprint"] = file_fingerprint(result.get("exe"))
+    return result
+
+
+def lookup_identity(connection: str, cred_bus) -> dict:
+    cached = CACHE.capture(connection, cred_bus, capture_identity)
+    return enrich_identity(cached)
+
+
+def resolve_service(destination: str, cache: dict, cred_bus) -> dict:
+    now = time.monotonic()
+    hit = cache.get(destination)
+    if hit and now - hit[0] < 30.0:
+        return dict(hit[1])
+    owner = destination
+    try:
+        if not destination.startswith(":"):
+            owner = str(
+                cred_bus.call_blocking(
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "GetNameOwner",
+                    "s",
+                    (destination,),
+                    timeout=1.0,
+                )
+            )
+    except Exception:
+        owner = None
+    value = {"name": destination, "owner": owner}
+    if owner:
+        ident = CACHE.capture(owner, cred_bus, capture_identity)
+        value.update(
+            {
+                "pid": ident.get("pid"),
+                "comm": ident.get("comm"),
+                "exe": ident.get("exe"),
+                "uid": ident.get("uid"),
+                "user": ident.get("user"),
+                "security_label": ident.get("security_label"),
+                "fingerprint": file_fingerprint(ident.get("exe")),
+                "owned_names": names_for(owner),
+            }
+        )
+    cache[destination] = (now, value)
+    return dict(value)
+
+
+def is_secret_call(destination: str, path: str, interface: str) -> bool:
+    return (
+        destination in SECRET_DESTS
+        or path.startswith(SECRET_PATH_PREFIX)
+        or interface.startswith(SECRET_IFACE_PREFIX)
+        or interface in PORTAL_SECRET_IFACES
+        or interface.startswith("org.freedesktop.impl.portal.Secret.")
+    )
+
+
+class MonitorThread(threading.Thread):
+    def __init__(self) -> None:
+        super().__init__(name="keyring-dbus-monitor", daemon=True)
+        self.proc: subprocess.Popen | None = None
+        self.seen: dict[tuple, float] = {}
+        self.service_cache: dict[str, tuple[float, dict]] = {}
+
+    def stop(self) -> None:
+        STOP.set()
+        proc = self.proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+    def _dedupe(self, sender: str, serial: str, stamp: float) -> bool:
+        key = (sender, serial, round(stamp, 6))
+        now = time.monotonic()
+        if key in self.seen:
+            return True
+        self.seen[key] = now
+        if len(self.seen) > 2000:
+            cutoff = now - 10.0
+            self.seen = {k: v for k, v in self.seen.items() if v >= cutoff}
+        return False
+
+    def _drain_stderr(self, proc: subprocess.Popen) -> None:
+        if proc.stderr is None:
+            return
+        last = ""
+        for line in proc.stderr:
+            text = line.strip()
+            if text:
+                last = text[:500]
+        if last and not STOP.is_set():
+            log_error("dbus-monitor stderr", stderr=last)
+
+    def run(self) -> None:
+        cred_bus = None
+        while not STOP.is_set():
+            try:
+                if cred_bus is None:
+                    cred_bus = dbus.bus.BusConnection(BUS_ADDRESS)
+                env = dict(os.environ)
+                env["DBUS_SESSION_BUS_ADDRESS"] = BUS_ADDRESS
+                cmd = ["dbus-monitor", "--session", *MATCH_RULES]
+                self.proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    env=env,
+                )
+                threading.Thread(
+                    target=self._drain_stderr, args=(self.proc,), daemon=True
+                ).start()
+                assert self.proc.stdout is not None
+                for line in self.proc.stdout:
+                    if STOP.is_set():
+                        break
+                    match = HEADER_RE.match(line)
+                    if not match:
+                        continue
+                    stamp = float(match.group(1))
+                    sender = match.group(2)
+                    destination = match.group(3)
+                    serial = match.group(4)
+                    path = match.group(5)
+                    interface = match.group(6)
+                    member = match.group(7)
+                    if destination.startswith("(") or sender.startswith("("):
+                        continue
+                    if not is_secret_call(destination, path, interface):
+                        continue
+                    if self._dedupe(sender, serial, stamp):
+                        continue
+                    caller = lookup_identity(sender, cred_bus)
+                    service = resolve_service(destination, self.service_cache, cred_bus)
+                    CACHE.prune()
+                    log_record(
+                        {
+                            "schema": SCHEMA,
+                            "record_id": uuid.uuid4().hex,
+                            "event": "secret_service_call",
+                            "ts": utc_iso(stamp),
+                            "time_unix": stamp,
+                            "message": {
+                                "type": "method_call",
+                                "serial": int(serial),
+                                "sender": sender,
+                                "destination": destination,
+                                "path": path,
+                                "interface": interface,
+                                "member": member,
+                                "operation": f"{interface}.{member}",
+                            },
+                            "caller": caller,
+                            "service": service,
+                            "owned_names": names_for(sender),
+                            "bus": BUS_INFO,
+                            "collector": {"version": VERSION, "pid": os.getpid()},
+                        }
+                    )
+                self.proc.wait()
+            except Exception as exc:  # keep the service alive and visible
+                log_error("monitor failure", error=f"{type(exc).__name__}: {exc}")
+            finally:
+                if self.proc and self.proc.poll() is None:
+                    try:
+                        self.proc.terminate()
+                    except OSError:
+                        pass
+            if not STOP.is_set():
+                log_error("dbus-monitor exited; restarting in 2s")
+                STOP.wait(2.0)
+
+
+def seed_names(mon, cred_bus) -> None:
+    try:
+        names = [str(name) for name in mon.list_names()]
+    except Exception as exc:
+        log_error("initial bus name enumeration failed", error=type(exc).__name__)
+        return
+    unique: list[str] = []
+    for name in names:
+        if name.startswith(":"):
+            unique.append(name)
+            continue
+        try:
+            owner = str(mon.get_name_owner(name))
+        except Exception:
+            continue
+        note_name_change(name, "", owner)
+    for connection in unique:
+        try:
+            CACHE.capture(connection, cred_bus, capture_identity)
+        except Exception:
+            pass
+
+
+def last_digest_in(path: Path) -> str | None:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+    with open(path, "rb") as handle:
+        handle.seek(max(0, size - 65536))
+        tail = handle.read().decode("utf-8", "replace")
+    for line in reversed(tail.splitlines()):
+        if line.strip():
+            try:
+                return json.loads(line).get("record_sha256")
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def verify(path: Path, state_path: Path) -> int:
+    errors: list[str] = []
+    records = 0
+    first_ts = None
+    last_ts = None
+    first_prev = None
+    prev = None
+    prior = last_digest_in(Path(str(path) + ".1"))
+    try:
+        handle = open(path, "r", encoding="utf-8")
+    except OSError as exc:
+        print(json.dumps({"ok": False, "error": str(exc), "path": str(path)}))
+        return 1
+    with handle:
+        for number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                errors.append(f"line {number}: invalid JSON")
+                continue
+            claimed = record.get("record_sha256")
+            body = {key: value for key, value in record.items() if key != "record_sha256"}
+            canonical = json.dumps(
+                body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            actual = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if claimed != actual:
+                errors.append(f"line {number}: record hash mismatch")
+            if records == 0:
+                first_prev = record.get("prev_sha256")
+                if prior and first_prev != prior:
+                    errors.append("first record does not link to rotated log")
+            elif record.get("prev_sha256") != prev:
+                errors.append(f"line {number}: chain link mismatch")
+            prev = claimed
+            records += 1
+            first_ts = first_ts or record.get("ts")
+            last_ts = record.get("ts")
+    result = {
+        "ok": not errors,
+        "path": str(path),
+        "records": records,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "first_prev_sha256": first_prev,
+        "errors": errors[:20],
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if not errors else 1
+
+
+def status(path: Path, state_path: Path) -> int:
+    info = {"path": str(path), "exists": path.exists()}
+    if path.exists():
+        st = path.stat()
+        info["bytes"] = st.st_size
+        info["mode"] = oct(st.st_mode & 0o777)
+    last = None
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(max(0, path.stat().st_size - 65536))
+            tail = handle.read().decode("utf-8", "replace")
+        for line in reversed(tail.splitlines()):
+            if line.strip():
+                last = json.loads(line)
+                break
+    except (OSError, json.JSONDecodeError):
+        pass
+    if last:
+        info["last"] = {
+            "ts": last.get("ts"),
+            "event": last.get("event"),
+            "record_sha256": last.get("record_sha256"),
+        }
+        if last.get("event") == "secret_service_call":
+            info["last"].update(
+                {
+                    "operation": last.get("message", {}).get("operation"),
+                    "caller_pid": last.get("caller", {}).get("pid"),
+                    "caller_comm": last.get("caller", {}).get("comm"),
+                    "caller_exe": last.get("caller", {}).get("exe"),
+                    "called_by": last.get("owned_names"),
+                }
+            )
+    try:
+        info["state"] = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    print(json.dumps(info, indent=2, sort_keys=True))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    global WRITER, QUIET
+    parser = argparse.ArgumentParser(
+        description="Attribute Secret Service D-Bus calls to exact processes."
+    )
+    parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--verify", action="store_true", help="verify the log hash chain")
+    parser.add_argument("--status", action="store_true", help="show log state")
+    parser.add_argument("--quiet", action="store_true", help="no per-call stderr line")
+    parser.add_argument("--version", action="version", version=f"keyring-watch {VERSION}")
+    args = parser.parse_args(argv)
+
+    if args.verify:
+        return verify(args.log, args.state)
+    if args.status:
+        return status(args.log, args.state)
+
+    QUIET = args.quiet
+    WRITER = LogWriter(args.log, args.state)
+    log_record(
+        collector_base(
+            "collector_start",
+            {
+                "match_rules": MATCH_RULES,
+                "redaction": [
+                    "D-Bus message bodies are never read or stored",
+                    "caller environment restricted to display/session/SSH keys",
+                    "credential-looking command-line arguments replaced",
+                    "log is local only; not included in evidence bundles or SIEM",
+                ],
+                "bus": BUS_INFO,
+            },
+        )
+    )
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    dbus.mainloop.glib.threads_init()
+
+    try:
+        mon = dbus.SessionBus()
+        cred_main = dbus.bus.BusConnection(BUS_ADDRESS)
+    except Exception as exc:
+        log_error("cannot connect to session bus", error=f"{type(exc).__name__}: {exc}")
+        WRITER.close()
+        return 1
+
+    def on_name_owner_changed(name, old, new):
+        name, old, new = str(name), str(old), str(new)
+        note_name_change(name, old, new)
+        if new.startswith(":") and not old:
+            try:
+                CACHE.capture(new, cred_main, capture_identity)
+            except Exception as exc:
+                log_error(
+                    "birth credential lookup failed",
+                    connection=new,
+                    error=type(exc).__name__,
+                )
+
+    mon.add_signal_receiver(
+        on_name_owner_changed,
+        signal_name="NameOwnerChanged",
+        dbus_interface="org.freedesktop.DBus",
+        bus_name="org.freedesktop.DBus",
+    )
+
+    monitor = MonitorThread()
+    monitor.start()
+    seed_names(mon, cred_main)
+
+    loop = GLib.MainLoop()
+    closing = {"done": False}
+
+    def shutdown(signum) -> bool:
+        if closing["done"]:
+            return GLib.SOURCE_REMOVE
+        closing["done"] = True
+        STOP.set()
+        monitor.stop()
+        monitor.join(timeout=3.0)
+        log_record(collector_base("collector_stop", {"signal": signum}))
+        if WRITER is not None:
+            WRITER.close()
+        loop.quit()
+        return GLib.SOURCE_REMOVE
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: shutdown("SIGTERM"))
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda: shutdown("SIGINT"))
+
+    try:
+        loop.run()
+    finally:
+        if not closing["done"]:
+            shutdown("exit")
+        if monitor.is_alive():
+            monitor.join(timeout=3.0)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

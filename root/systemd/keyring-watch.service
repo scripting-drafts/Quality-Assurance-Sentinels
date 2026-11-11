@@ -1,0 +1,31 @@
+[Unit]
+Description=QA Sentinels Secret Service caller attribution
+Documentation=https://github.com/scripting-drafts/Quality-Assurance-Sentinels/blob/main/docs/KEYRING-WATCH.md
+After=dbus.socket
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/QA-Sentinels/bin/keyring-watch
+Restart=always
+RestartSec=2
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+LimitCORE=0
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/QA-Sentinels/var
+InaccessiblePaths=-%h/.local/share/keyrings -%h/.config/goa-1.0
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

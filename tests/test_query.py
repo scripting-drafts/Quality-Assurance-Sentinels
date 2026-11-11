@@ -32,6 +32,21 @@ class QueryEngineTests(unittest.TestCase):
         self.assertIn("errors", query.CATEGORY_ORDER)
         self.assertIn("findings", query.CATEGORY_ORDER)
 
+    def test_catalog_covers_every_data_table(self):
+        for category in (
+            "processes", "inventory-items", "inventory-diffs", "hardware-items",
+            "core2", "crosschecks", "notifications", "reports", "meta",
+        ):
+            self.assertIn(category, query.CATEGORY_ORDER)
+
+    def test_every_catalog_category_runs(self):
+        conn = self._conn()
+        for category in query.CATEGORY_ORDER:
+            with self.subTest(category=category):
+                result = query.run_category(conn, category, limit=1)
+                self.assertEqual(result["category"], category)
+                self.assertIsInstance(result["columns"], list)
+
     def test_cli_query_parser(self):
         from sentinels import cli
 

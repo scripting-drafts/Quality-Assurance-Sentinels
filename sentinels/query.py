@@ -1,9 +1,9 @@
 """Read-only query engine for sentinels.db.
 
-The desktop Inbox and the CLI share one category catalog so the buttons cannot
-drift from the command line.  Arbitrary SQL is accepted only after it is proven
-to be a single read-only statement; a connection authorizer then denies every
-action that is not a read.
+The desktop Database and the CLI share one category catalog so the buttons
+cannot drift from the command line.  Arbitrary SQL is accepted only after it is
+proven to be a single read-only statement; a connection authorizer then denies
+every action that is not a read.
 """
 from __future__ import annotations
 
@@ -36,9 +36,10 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "label": "Inbox",
         "description": "Open critical, error and warning findings, most severe first.",
         "sql": (
-            "SELECT id, ts, last_ts, severity, status, rule, subject, count, detail "
-            "FROM findings WHERE status IN ('open', 'investigating') "
-            f"AND severity IN ('critical', 'error', 'warning') "
+            "SELECT id, ts, last_ts, severity, status, rule, subject, count, detail, "
+            "case_id, fingerprint, evidence_path FROM findings "
+            "WHERE status IN ('open', 'investigating') "
+            "AND severity IN ('critical', 'error', 'warning') "
             f"ORDER BY {_FINDING_SEVERITY_ORDER}, last_ts DESC, id DESC LIMIT {{limit}}"
         ),
     },
@@ -46,8 +47,9 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "label": "Errors",
         "description": "Open critical and error findings, most severe first.",
         "sql": (
-            "SELECT id, ts, last_ts, severity, status, rule, subject, count, detail "
-            "FROM findings WHERE status IN ('open', 'investigating') "
+            "SELECT id, ts, last_ts, severity, status, rule, subject, count, detail, "
+            "case_id, fingerprint, evidence_path FROM findings "
+            "WHERE status IN ('open', 'investigating') "
             "AND severity IN ('critical', 'error') "
             f"ORDER BY {_FINDING_SEVERITY_ORDER}, last_ts DESC, id DESC LIMIT {{limit}}"
         ),
@@ -57,7 +59,7 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "description": "Every layer-1 finding, including resolved and dismissed.",
         "sql": (
             "SELECT id, ts, last_ts, severity, status, rule, subject, count, detail, "
-            "case_id, fingerprint FROM findings "
+            "case_id, fingerprint, evidence_path FROM findings "
             f"ORDER BY {_FINDING_SEVERITY_ORDER}, last_ts DESC, id DESC LIMIT {{limit}}"
         ),
     },
@@ -74,7 +76,8 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "description": "Findings created by a cycle, linked back to the cycle time.",
         "sql": (
             "SELECT cf.ts AS cycle_ts, f.id, f.ts, f.last_ts, f.severity, f.status, "
-            "f.rule, f.subject, f.count, f.detail FROM cycle_findings cf "
+            "f.rule, f.subject, f.count, f.detail, f.case_id, f.fingerprint, "
+            "f.evidence_path FROM cycle_findings cf "
             "JOIN findings f ON f.id=cf.finding_id "
             "ORDER BY cf.ts DESC, CASE f.severity WHEN 'critical' THEN 0 "
             "WHEN 'error' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END, "
@@ -85,7 +88,8 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "label": "Events",
         "description": "Ingested journal warnings, errors and critical events.",
         "sql": (
-            "SELECT id, ts, last_ts, severity, count, source, unit, comm, message "
+            "SELECT id, ts, last_ts, severity, count, source, unit, comm, message, "
+            "boot_id, pid, fingerprint, length(raw) AS raw_bytes "
             "FROM events ORDER BY last_ts DESC, ts DESC, id DESC LIMIT {limit}"
         ),
     },
@@ -94,7 +98,8 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "description": "Captured crashes and whether physical core 2 was involved.",
         "sql": (
             "SELECT id, ts, comm, sig, core2_involved, cpus_allowed, exe, "
-            "fingerprint, context FROM crashes ORDER BY ts DESC, id DESC LIMIT {limit}"
+            "fingerprint, context, pid, corefile "
+            "FROM crashes ORDER BY ts DESC, id DESC LIMIT {limit}"
         ),
     },
     "boots": {
@@ -102,7 +107,8 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "description": "Boot boundaries classified as clean, unclean or unknown.",
         "sql": (
             "SELECT id, boot_id, seq, last_ts, ended_clean, vmcores, pstore, "
-            "last_message FROM boots ORDER BY last_ts DESC, id DESC LIMIT {limit}"
+            "last_message, span, markers, scans, kexec_loaded, crashkernel, "
+            "captured_ts FROM boots ORDER BY last_ts DESC, id DESC LIMIT {limit}"
         ),
     },
     "samples": {
@@ -113,24 +119,59 @@ CATEGORIES: dict[str, dict[str, str]] = {
             "FROM samples ORDER BY ts DESC, id DESC LIMIT {limit}"
         ),
     },
+    "processes": {
+        "label": "Process snapshots",
+        "description": "Per-sample process table with affinity, memory and state.",
+        "sql": (
+            "SELECT ts, pid, ppid, comm, state, threads, rss_kb, cpu_ticks, "
+            "last_cpu, cpus_allowed, exe FROM proc_snap "
+            "ORDER BY ts DESC, pid LIMIT {limit}"
+        ),
+    },
     "inventory": {
-        "label": "Inventory",
+        "label": "Inventory runs",
         "description": "Software inventory snapshots and their changed-item counts.",
         "sql": (
             "SELECT id, ts, digest, counts, note FROM inventory_runs "
             "ORDER BY ts DESC, id DESC LIMIT {limit}"
         ),
     },
+    "inventory-items": {
+        "label": "Inventory items",
+        "description": "Recorded software and configuration items for each inventory run.",
+        "sql": (
+            "SELECT i.run_id, r.ts, i.layer, i.item, i.value "
+            "FROM inventory i LEFT JOIN inventory_runs r ON r.id = i.run_id "
+            "ORDER BY i.run_id DESC, i.layer, i.item LIMIT {limit}"
+        ),
+    },
+    "inventory-diffs": {
+        "label": "Inventory changes",
+        "description": "Items added, removed or changed between inventory runs.",
+        "sql": (
+            "SELECT id, ts, run_id, layer, change, item, old_value, new_value "
+            "FROM inventory_diffs ORDER BY ts DESC, id DESC LIMIT {limit}"
+        ),
+    },
     "hardware": {
-        "label": "Hardware",
+        "label": "Hardware runs",
         "description": "Hardware-health runs across RAS, EDAC, AER, APEI and SMART.",
         "sql": (
             "SELECT id, ts, status, sources, duration_ms, detail FROM hardware_runs "
             "ORDER BY ts DESC, id DESC LIMIT {limit}"
         ),
     },
+    "hardware-items": {
+        "label": "Hardware items",
+        "description": "Hardware components recorded by each hardware-health run.",
+        "sql": (
+            "SELECT i.run_id, r.ts, i.source, i.item, i.value "
+            "FROM hardware_items i LEFT JOIN hardware_runs r ON r.id = i.run_id "
+            "ORDER BY i.run_id DESC, i.source, i.item LIMIT {limit}"
+        ),
+    },
     "lsm": {
-        "label": "LSM",
+        "label": "LSM runs",
         "description": "Linux Security Modules state, denials and drift.",
         "sql": (
             "SELECT id, ts, status, digest, denials, state FROM lsm_runs "
@@ -142,12 +183,12 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "description": "Recurring signatures grouped across boots.",
         "sql": (
             "SELECT id, boot_id, vendor, component, signature, occurrences, crashes, "
-            "window_start, window_end FROM correlations "
+            "window_start, window_end, display, created FROM correlations "
             "ORDER BY window_end DESC, id DESC LIMIT {limit}"
         ),
     },
     "tickets": {
-        "label": "Tickets",
+        "label": "Ticket drafts",
         "description": "Drafted vendor tickets and their issue keys.",
         "sql": (
             "SELECT id, ts, vendor, title, issue_key, path FROM ticket_drafts "
@@ -158,8 +199,9 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "label": "Deep runs",
         "description": "Layer-2 deep tracing runs and their status.",
         "sql": (
-            "SELECT id, ts, case_id, finding_id, status, reason, duration_s, comm "
-            "FROM deep_runs ORDER BY ts DESC, id DESC LIMIT {limit}"
+            "SELECT id, ts, case_id, finding_id, status, reason, duration_s, comm, "
+            "pid, path, sha256, summary FROM deep_runs "
+            "ORDER BY ts DESC, id DESC LIMIT {limit}"
         ),
     },
     "bundles": {
@@ -176,6 +218,47 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "sql": (
             "SELECT id, ts, task, ok, detail FROM runs "
             "ORDER BY ts DESC, id DESC LIMIT {limit}"
+        ),
+    },
+    "core2": {
+        "label": "Core 2 cases",
+        "description": "Physical core 2 triage cases, verdicts and evidence paths.",
+        "sql": (
+            "SELECT id, case_key, created, updated, kind, verdict, process, "
+            "signature, status, event_ts, affinity, notes, path, detail "
+            "FROM core2_cases ORDER BY updated DESC, id DESC LIMIT {limit}"
+        ),
+    },
+    "crosschecks": {
+        "label": "Crosschecks",
+        "description": "Draft and correlation crosscheck runs, with drift detail.",
+        "sql": (
+            "SELECT id, ts, checked, drift, detail FROM crosschecks "
+            "ORDER BY ts DESC, id DESC LIMIT {limit}"
+        ),
+    },
+    "notifications": {
+        "label": "Notifications",
+        "description": "Queued and delivered notifications with retry state.",
+        "sql": (
+            "SELECT id, ts, kind, key, title, delivered, attempts, last_attempt, "
+            "last_error, path, body, detail FROM notifications "
+            "ORDER BY ts DESC, id DESC LIMIT {limit}"
+        ),
+    },
+    "reports": {
+        "label": "Reports",
+        "description": "Generated startup and daily reports with their paths.",
+        "sql": (
+            "SELECT id, ts, kind, path, summary FROM reports "
+            "ORDER BY ts DESC, id DESC LIMIT {limit}"
+        ),
+    },
+    "meta": {
+        "label": "Metadata",
+        "description": "Internal state and scheduling markers stored by the engine.",
+        "sql": (
+            "SELECT key, value FROM meta ORDER BY key LIMIT {limit}"
         ),
     },
 }
@@ -341,7 +424,7 @@ def _finding_sql(
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = (
         "SELECT id, ts, last_ts, severity, status, rule, subject, count, detail, "
-        "case_id, fingerprint FROM findings"
+        "case_id, fingerprint, evidence_path FROM findings"
         f"{where} ORDER BY {_FINDING_SEVERITY_ORDER}, last_ts DESC, id DESC "
         f"LIMIT {limit}"
     )
@@ -377,7 +460,8 @@ def _filtered_category_sql(
             params.append(since)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return (
-            "SELECT id, ts, last_ts, severity, count, source, unit, comm, message "
+            "SELECT id, ts, last_ts, severity, count, source, unit, comm, message, "
+            "boot_id, pid, fingerprint, length(raw) AS raw_bytes "
             f"FROM events{where} ORDER BY last_ts DESC, ts DESC, id DESC LIMIT {limit}",
             params,
         )
@@ -400,7 +484,8 @@ def _filtered_category_sql(
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return (
             "SELECT id, ts, comm, sig, core2_involved, cpus_allowed, exe, "
-            f"fingerprint, context FROM crashes{where} "
+            "fingerprint, context, pid, corefile "
+            f"FROM crashes{where} "
             f"ORDER BY ts DESC, id DESC LIMIT {limit}",
             params,
         )

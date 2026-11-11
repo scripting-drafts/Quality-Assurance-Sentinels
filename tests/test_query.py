@@ -33,11 +33,22 @@ class QueryEngineTests(unittest.TestCase):
         self.assertIn("findings", query.CATEGORY_ORDER)
 
     def test_catalog_covers_every_data_table(self):
-        for category in (
-            "processes", "inventory-items", "inventory-diffs", "hardware-items",
-            "core2", "crosschecks", "notifications", "reports", "meta",
-        ):
+        expected_sources = {
+            "processes": "proc_snap",
+            "inventory-items": "inventory",
+            "inventory-diffs": "inventory_diffs",
+            "hardware-items": "hardware_items",
+            "core2": "core2_cases",
+            "crosschecks": "crosschecks",
+            "notifications": "notifications",
+            "reports": "reports",
+            "meta": "meta",
+        }
+        for category, source in expected_sources.items():
             self.assertIn(category, query.CATEGORY_ORDER)
+            self.assertEqual(query.CATEGORY_SOURCES[category], source)
+        for entry in query.catalog():
+            self.assertTrue(entry["source"], entry["id"])
 
     def test_every_catalog_category_runs(self):
         conn = self._conn()

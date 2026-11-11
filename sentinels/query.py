@@ -263,6 +263,35 @@ CATEGORIES: dict[str, dict[str, str]] = {
     },
 }
 
+CATEGORY_SOURCES = {
+    "inbox": "findings",
+    "errors": "findings",
+    "findings": "findings",
+    "cycles": "runs",
+    "new-findings": "cycle_findings",
+    "events": "events",
+    "crashes": "crashes",
+    "boots": "boots",
+    "samples": "samples",
+    "processes": "proc_snap",
+    "inventory": "inventory_runs",
+    "inventory-items": "inventory",
+    "inventory-diffs": "inventory_diffs",
+    "hardware": "hardware_runs",
+    "hardware-items": "hardware_items",
+    "lsm": "lsm_runs",
+    "correlations": "correlations",
+    "tickets": "ticket_drafts",
+    "deep": "deep_runs",
+    "bundles": "bundles",
+    "runs": "runs",
+    "core2": "core2_cases",
+    "crosschecks": "crosschecks",
+    "notifications": "notifications",
+    "reports": "reports",
+    "meta": "meta",
+}
+
 CATEGORY_ORDER = tuple(CATEGORIES)
 
 
@@ -284,6 +313,7 @@ def catalog() -> list[dict[str, str]]:
             "id": name,
             "label": CATEGORIES[name]["label"],
             "description": CATEGORIES[name]["description"],
+            "source": CATEGORY_SOURCES.get(name, ""),
         }
         for name in CATEGORY_ORDER
     ]

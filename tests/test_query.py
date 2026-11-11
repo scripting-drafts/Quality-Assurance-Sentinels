@@ -67,6 +67,18 @@ class QueryEngineTests(unittest.TestCase):
         self.assertEqual(args.category, "inbox")
         self.assertEqual(args.limit, 25)
         self.assertTrue(args.json)
+        schema = cli.build_parser().parse_args(["query", "--json", "--schema"])
+        self.assertTrue(schema.schema)
+
+    def test_schema_lists_tables_rows_and_columns(self):
+        tables = query.schema(self._conn())
+        names = {table["name"] for table in tables}
+        self.assertIn("findings", names)
+        self.assertIn("events", names)
+        findings = next(table for table in tables if table["name"] == "findings")
+        self.assertEqual(findings["rows"], 4)
+        self.assertIn("severity", [column["name"]
+                                   for column in findings["columns"]])
 
     def test_inbox_orders_by_severity_then_time(self):
         result = query.run_category(self._conn(), "inbox", limit=10)

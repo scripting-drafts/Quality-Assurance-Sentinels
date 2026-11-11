@@ -319,6 +319,29 @@ def catalog() -> list[dict[str, str]]:
     ]
 
 
+def _quote_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def schema(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return every user table with its row count and columns."""
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in tables:
+        name = str(row[0])
+        quoted = _quote_identifier(name)
+        columns = [
+            {"name": str(column["name"]), "type": str(column["type"] or "")}
+            for column in conn.execute(f"PRAGMA table_info({quoted})")
+        ]
+        count = conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
+        out.append({"name": name, "rows": int(count), "columns": columns})
+    return out
+
+
 def normalize_limit(limit: Any) -> int:
     try:
         value = int(limit)

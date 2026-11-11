@@ -189,7 +189,9 @@ def cmd_query(args) -> int:
     conn = None
     try:
         conn = db.connect_readonly()
-        if args.latest_cycle:
+        if args.schema:
+            result = {"tables": query.schema(conn)}
+        elif args.latest_cycle:
             result = query.latest_cycle(conn)
         elif args.sql:
             if args.search or args.severity or args.status or args.since:
@@ -219,7 +221,7 @@ def cmd_query(args) -> int:
 
     if args.json:
         print(json.dumps(result, default=str))
-    elif args.latest_cycle:
+    elif args.latest_cycle or args.schema:
         print(json.dumps(result, indent=2, default=str))
     else:
         print(query.format_table(result))
@@ -1586,6 +1588,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help="emit JSON for the dashboard")
     s.add_argument("--list-categories", action="store_true",
                    help="list the available inbox categories as JSON")
+    s.add_argument("--schema", action="store_true",
+                   help="list tables, row counts and columns as JSON")
     s.set_defaults(func=cmd_query)
 
     s = sub.add_parser("findings", help="list layer-1 findings and update their status")

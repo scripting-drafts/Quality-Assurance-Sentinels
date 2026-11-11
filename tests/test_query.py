@@ -160,6 +160,7 @@ class QueryEngineTests(unittest.TestCase):
             conn.execute("SELECT count(*) FROM findings").fetchone()[0], 4)
 
     def test_limit_validation(self):
+        self.assertEqual(query.normalize_limit(query.MAX_LIMIT), 10000)
         for limit in (0, -1, query.MAX_LIMIT + 1, "many"):
             with self.subTest(limit=limit):
                 with self.assertRaises(query.QueryError):

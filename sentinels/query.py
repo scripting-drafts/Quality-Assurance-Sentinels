@@ -72,7 +72,7 @@ CATEGORIES: dict[str, dict[str, str]] = {
         ),
     },
     "new-findings": {
-        "label": "New findings",
+        "label": "Cycle findings",
         "description": "Findings created by a cycle, linked back to the cycle time.",
         "sql": (
             "SELECT cf.ts AS cycle_ts, f.id, f.ts, f.last_ts, f.severity, f.status, "

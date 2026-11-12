@@ -1,6 +1,6 @@
 [Unit]
 Description=QA Sentinels Secret Service caller attribution
-Documentation=https://github.com/scripting-drafts/Quality-Assurance-Sentinels/blob/main/docs/KEYRING-WATCH.md
+Documentation=https://github.com/scripting-drafts/QA-Sentinels/blob/main/docs/KEYRING-WATCH.md
 After=dbus.socket
 StartLimitIntervalSec=0
 

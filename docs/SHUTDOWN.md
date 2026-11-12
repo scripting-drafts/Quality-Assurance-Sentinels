@@ -25,7 +25,7 @@ Covered messages include:
 The next routine ingest replays both phases into the events table. The layer-1
 rules `systemd.service_start`, `systemd.unmount`, `systemd.unit_stop` and
 `systemd.shutdown` turn them into findings, so they appear in reports,
-evidence bundles, the SIEM export, and the normal ticket workflow.
+evidence bundles, and the normal ticket workflow.
 
 The listener also works without the systemd unit: `bin/qa boots` reconstructs
 both phases from the latest completed boot's journal and stores the summary in
@@ -44,7 +44,7 @@ Captured issues are redacted before they are written. Choose a profile with
 | `metadata` | Withholds message text; keeps rule, unit, severity, timestamps, counts and fingerprint. |
 
 Files are mode `0600`; `var/shutdown/` is mode `0700`. Exported findings pass
-through the normal SIEM/evidence/ticket redaction again.
+through the normal evidence/ticket redaction again.
 
 Set `QA_CAPTURE_BOOT=0` to record only the shutdown phase.
 

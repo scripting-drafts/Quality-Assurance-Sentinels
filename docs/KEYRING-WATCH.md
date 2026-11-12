@@ -24,7 +24,7 @@ what was stored or retrieved.
 - Password/token/secret-looking argv values (replaced with `<redacted>`).
 
 The log is host-local, mode `0600`, under `var/` (gitignored). It is not part of
-evidence bundles or SIEM forwarding.
+evidence bundles.
 
 ## Files
 

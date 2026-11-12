@@ -1,8 +1,8 @@
 """Ubuntu upgrade compatibility checks for QA Sentinels.
 
-The matrix mirrors the companion QA SIEM repository.  It is intentionally
-conservative: a host outside the supported Ubuntu/Python/SQLite/systemd/kernel
-range is reported as unsupported instead of being silently assumed to work.
+The matrix is intentionally conservative: a host outside the supported
+Ubuntu/Python/SQLite/systemd/kernel range is reported as unsupported instead of
+being silently assumed to work.
 """
 from __future__ import annotations
 

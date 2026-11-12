@@ -1,7 +1,6 @@
 # Compatibility
 
-QA Sentinels targets Ubuntu LTS and interim releases through 26.10. The same
-baseline is used by the companion QA SIEM repository.
+QA Sentinels targets Ubuntu LTS and interim releases through 26.10.
 
 ## Baseline
 
@@ -49,7 +48,6 @@ the documented minimums. `--strict` exits non-zero outside the baseline.
    (or keep the cron schedule).
 6. Rebuild optional eBPF/perf artifacts for the new kernel.
 7. Run `./bin/qa preflight` and `./bin/qa cycle`.
-8. Run the QA SIEM `compat` check and verify the forwarder.
 
 ## Release-specific notes
 
@@ -63,8 +61,6 @@ the documented minimums. `--strict` exits non-zero outside the baseline.
   state instead of inventing it.
 - **NVIDIA/lockdown:** do not add `lockdown=integrity` unless all required
   modules are signed; the installer does not enable it by default.
-- **QA SIEM sync:** keep `schema_version` at `1.0` and update both repositories'
-  compatibility matrices in the same change.
 
 ## Limits
 

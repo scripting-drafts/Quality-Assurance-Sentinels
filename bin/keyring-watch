@@ -10,7 +10,7 @@ Privacy rule: D-Bus message bodies are never parsed, persisted, or printed.
 Only the message envelope and process/session identifiers are written.  The
 caller's environment is read through a strict whitelist (display/session/SSH
 variables), never dumped.  The log is host-local, mode 0600, and is not part
-of QA-Sentinels evidence bundles or SIEM forwarding.
+of QA-Sentinels evidence bundles.
 
 Output: var/keyring-access.log  (JSONL, hash-chained)
         var/keyring-access.state (chain state across rotation)
@@ -1291,7 +1291,7 @@ def main(argv: list[str] | None = None) -> int:
                     "D-Bus message bodies are never read or stored",
                     "caller environment restricted to display/session/SSH keys",
                     "credential-looking command-line arguments replaced",
-                    "log is local only; not included in evidence bundles or SIEM",
+                    "log is local only; not included in evidence bundles",
                 ],
                 "bus": BUS_INFO,
             },

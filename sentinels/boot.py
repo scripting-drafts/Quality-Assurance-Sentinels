@@ -310,14 +310,21 @@ def scan_boot(boot: dict, refresh: bool = False) -> dict:
     # The shutdown listener is the only source for errors written after the
     # last routine cycle.  Reconstruct the window for the latest completed
     # boot; older boots keep a capture record when one exists instead of
-    # paying for another journal scan.
+    # paying for another journal scan.  Persist the reconstruction so
+    # `shutdown --list` and replay still work when the listener was killed
+    # before execve; an existing listener capture is never replaced.
+    latest = boot.get("index") == -1
     try:
         sd = shutdown.scan_boot(
-            boot_id, boot_id=boot_id, refresh=refresh,
-            journal=boot.get("index") == -1,
+            boot_id, boot_id=boot_id, refresh=refresh, journal=latest,
         )
     except Exception:  # noqa: BLE001 - a boot verdict must not depend on this
         sd = {"count": 0, "errors": [], "phases": {}, "window_start": ""}
+    if latest and sd.get("boot_id"):
+        try:
+            shutdown.persist(sd)
+        except Exception:  # noqa: BLE001 - persistence must not change the verdict
+            pass
     phase_summary = sd.get("phases") or {}
     for phase, key, label in (
         ("boot", "startup", "startup errors"),

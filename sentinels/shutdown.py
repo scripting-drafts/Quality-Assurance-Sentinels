@@ -5,12 +5,15 @@ written after the last routine cycle.  A unit can fail to start during boot or
 while services are stopped, and a filesystem can fail to unmount.  A volatile
 journal then loses the evidence at the next boot.
 
-``qa shutdown --capture`` is installed as a ``final.target`` service.  It runs
-after normal services and mounts are gone, reads the current boot's matching
-failures, and stores them under ``var/shutdown`` as two phases: ``boot`` and
-``shutdown``.  The next routine ingest replays them into the events table,
-where the normal layer-1 rules turn them into findings.  On systems without
-the unit, the same scan is reconstructed from the previous boot's journal.
+``qa shutdown --capture`` is installed as a ``final.target`` service, ordered
+``Before=final.target`` so PID 1 waits for it instead of killing it during the
+handoff to ``systemd-shutdown``.  It runs after normal services and mounts are
+gone, reads the current boot's matching failures, and stores them under
+``var/shutdown`` as two phases: ``boot`` and ``shutdown``.  The next routine
+ingest replays them into the events table, where the normal layer-1 rules turn
+them into findings.  On systems without the unit, or when the listener is
+killed before exec, the same scan is reconstructed from the previous boot's
+persistent journal and persisted by the next boot scan.
 """
 from __future__ import annotations
 
@@ -58,6 +61,11 @@ FAILURE_GREP = (
 _URL_RE = re.compile(r"https?://\S+")
 _PATH_RE = re.compile(r"(?<![\w:])/(?:[\w.@+-]+/)+[\w.@+-]*")
 _USER_PATH_RE = re.compile(r"(?<![\w:])(/(?:home|media|Users)/)[^/\s]+")
+_BOOT_ID_RE = re.compile(
+    r"^(?:[0-9a-f]{32}|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------- journal
@@ -372,6 +380,31 @@ def capture(boot_ref: str = "0") -> dict:
     if record["boot_id"]:
         _write(record)
     return record
+
+
+def persist(record: dict, overwrite: bool = False) -> bool:
+    """Store a reconstructed scan unless a listener capture already exists.
+
+    The ``final.target`` listener is best-effort: PID 1 can hand off to
+    ``systemd-shutdown`` before the unit reaches ``execve``.  Startup
+    reconstruction reads the previous boot from the persistent journal, so the
+    record survives even when the listener did not.  An existing file wins by
+    default because it carries the shutdown-phase evidence and the redaction
+    profile used on the machine that produced it.
+    """
+    boot_id = str(record.get("boot_id") or "").strip()
+    if not _BOOT_ID_RE.fullmatch(boot_id):
+        # systemd boot IDs are 128-bit hex or UUID form; rejecting anything
+        # else also keeps an untrusted ID from escaping SHUTDOWN_DIR.
+        return False
+    if not overwrite and _path(boot_id).exists():
+        return False
+    stored = dict(record)
+    stored["boot_id"] = boot_id
+    if not stored.get("captured_ts"):
+        stored["captured_ts"] = iso()
+    _write(stored)
+    return True
 
 
 def scan_boot(

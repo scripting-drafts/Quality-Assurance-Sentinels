@@ -16,6 +16,16 @@ warning-or-worse journal messages from the whole boot in
 - **`boot`** — failures from boot start until the shutdown marker
 - **`shutdown`** — failures from the shutdown marker to the end of the journal
 
+The unit must be ordered `Before=final.target` in addition to
+`WantedBy=final.target`. `WantedBy` only pulls the unit in; without the
+ordering, `final.target` is reached first and PID 1 hands off to
+`systemd-shutdown`, which SIGTERMs the unit before it can reach `execve`.
+The installer emits both settings.
+
+The capture runs after `umount.target`, so the checkout must be on a
+filesystem that is still mounted: keep it on `/`, or point `QA_SHUTDOWN_DIR`
+at a path that survives until `final.target`.
+
 Covered messages include:
 
 - `Failed to start OpenBSD Secure Shell server.`
@@ -28,9 +38,18 @@ rules `systemd.service_start`, `systemd.unmount`, `systemd.unit_stop` and
 evidence bundles, and the normal ticket workflow.
 
 The listener also works without the systemd unit: `bin/qa boots` reconstructs
-both phases from the latest completed boot's journal and stores the summary in
-the boot's scan record. A volatile journal that loses the previous boot is the
-reason the capture file exists.
+both phases from the latest completed boot's persistent journal. The next boot
+scan persists that reconstruction to `var/shutdown/<boot-id>.json` when the
+listener did not produce a file, so `--list` and replay still receive it. An
+existing listener capture is never overwritten. A volatile journal that loses
+the previous boot is the reason the listener exists.
+
+After upgrading an install whose listener never completed, backfill the latest
+completed boot once:
+
+```bash
+bin/qa boots --refresh
+```
 
 ## Redaction paths
 
@@ -70,6 +89,7 @@ bin/qa shutdown --scan --boot 0
 
 ```bash
 systemctl is-enabled qa-shutdown-capture.service
+systemctl show qa-shutdown-capture.service -p Before -p WantedBy
 systemctl status qa-shutdown-capture.service   # inactive until shutdown
 journalctl -u qa-shutdown-capture.service -b -1
 bin/qa shutdown --list
@@ -77,8 +97,7 @@ bin/qa status
 ```
 
 A capture is written only when the project directory is still mounted at
-`final.target`. Keep the checkout on the root filesystem, or adjust
-`ReadWritePaths=` and the capture directory in the unit and `QA_SHUTDOWN_DIR`.
+`final.target`; see the ordering and mount notes above.
 
 Uninstall with:
 

@@ -2,8 +2,10 @@
 # Install/remove the shutdown-window error listener.
 #
 # The unit is wanted by final.target, so it starts after normal services and
-# mounts are gone, captures the shutdown errors, and exits.  It never runs as
-# root during normal operation.
+# mounts are gone, captures the shutdown errors, and exits.  It is also ordered
+# Before=final.target: WantedBy only adds a dependency, and without the ordering
+# PID 1 can hand off to systemd-shutdown and kill the unit before it execs.
+# It never runs as root during normal operation.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE=/etc/systemd/system/qa-shutdown-capture.service
@@ -51,6 +53,7 @@ cat >"$SERVICE" <<EOF
 Description=QA Sentinels boot and shutdown error listener
 Documentation=file://$ROOT/docs/SHUTDOWN.md
 DefaultDependencies=no
+Before=final.target
 After=umount.target systemd-journald.service
 ConditionPathExists=$ROOT/bin/qa
 

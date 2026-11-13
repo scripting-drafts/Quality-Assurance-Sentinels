@@ -10,6 +10,8 @@ from unittest import mock
 
 from sentinels import boot, config, db, detect, shutdown, util
 
+BOOT_ID = "0123456789abcdef0123456789abcdef"
+
 
 def _entry(message, unit="init.scope", boot_id="boot-1", priority="3",
            ts="2026-11-07T21:06:01Z"):
@@ -159,6 +161,62 @@ class CaptureTests(unittest.TestCase):
                 self.assertTrue(path.exists())
                 self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
                 self.assertEqual(shutdown.load("boot-1")["count"], 1)
+
+
+class PersistTests(unittest.TestCase):
+    def _record(self, boot_id=BOOT_ID, count=0):
+        return {
+            "schema_version": shutdown.SCHEMA_VERSION,
+            "boot_id": boot_id,
+            "captured_ts": "2026-11-07T21:07:00Z",
+            "redaction": "strict",
+            "phases": {
+                "boot": {"count": 0, "signatures": 0, "start": "", "end": ""},
+                "shutdown": {"count": 0, "signatures": 0, "start": "", "end": ""},
+            },
+            "count": count,
+            "errors": [],
+            "window_start": "",
+            "window_end": "",
+        }
+
+    def test_persist_writes_reconstructed_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "shutdown"
+            directory.mkdir()
+            with mock.patch.object(config, "SHUTDOWN_DIR", directory), \
+                 mock.patch.object(config, "ensure_dirs", lambda: None):
+                self.assertTrue(shutdown.persist(self._record()))
+                path = directory / f"{BOOT_ID}.json"
+                self.assertTrue(path.exists())
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+                self.assertEqual(shutdown.load(BOOT_ID)["boot_id"], BOOT_ID)
+
+    def test_persist_keeps_existing_listener_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "shutdown"
+            directory.mkdir()
+            path = directory / f"{BOOT_ID}.json"
+            path.write_text(json.dumps(self._record(count=7)))
+            with mock.patch.object(config, "SHUTDOWN_DIR", directory), \
+                 mock.patch.object(config, "ensure_dirs", lambda: None):
+                self.assertFalse(shutdown.persist(self._record()))
+                self.assertEqual(shutdown.load(BOOT_ID)["count"], 7)
+
+    def test_persist_requires_a_boot_id(self):
+        self.assertFalse(shutdown.persist(self._record(boot_id="")))
+
+    def test_persist_rejects_non_boot_ids(self):
+        self.assertFalse(shutdown.persist(self._record(boot_id="abc")))
+        self.assertFalse(shutdown.persist(self._record(boot_id="../escape")))
+
+
+class InstallUnitTests(unittest.TestCase):
+    def test_unit_is_ordered_before_final_target(self):
+        script = Path(__file__).resolve().parents[1] / "root" / "install-shutdown.sh"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("Before=final.target", text)
+        self.assertIn("WantedBy=final.target", text)
 
 
 class ReplayTests(unittest.TestCase):
@@ -320,6 +378,40 @@ class BootScanTests(unittest.TestCase):
                          ["Failed to start OpenBSD Secure Shell server."])
         self.assertEqual(scans["shutdown"]["sample"],
                          ["Failed unmounting /media/<user>/2."])
+
+    def test_latest_boot_scan_persists_reconstruction(self):
+        record = {"index": -1, "boot_id": "boot-1", "span": "span"}
+        summary = {
+            "boot_id": "boot-1",
+            "count": 0,
+            "phases": {},
+            "errors": [],
+        }
+        with mock.patch.object(boot, "_journal", return_value=""), \
+             mock.patch.object(boot, "_scan_output", return_value=""), \
+             mock.patch.object(boot, "_last_epoch",
+                               return_value="2026-11-07T21:06:07Z"), \
+             mock.patch.object(boot.shutdown, "scan_boot", return_value=summary), \
+             mock.patch.object(boot.shutdown, "persist") as persist:
+            boot.scan_boot(record)
+        persist.assert_called_once_with(summary)
+
+    def test_older_boot_scan_does_not_persist(self):
+        record = {"index": -2, "boot_id": "boot-1", "span": "span"}
+        summary = {
+            "boot_id": "boot-1",
+            "count": 0,
+            "phases": {},
+            "errors": [],
+        }
+        with mock.patch.object(boot, "_journal", return_value=""), \
+             mock.patch.object(boot, "_scan_output", return_value=""), \
+             mock.patch.object(boot, "_last_epoch",
+                               return_value="2026-11-07T21:06:07Z"), \
+             mock.patch.object(boot.shutdown, "scan_boot", return_value=summary), \
+             mock.patch.object(boot.shutdown, "persist") as persist:
+            boot.scan_boot(record)
+        persist.assert_not_called()
 
 
 if __name__ == "__main__":

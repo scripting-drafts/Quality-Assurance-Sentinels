@@ -51,6 +51,14 @@ completed boot once:
 bin/qa boots --refresh
 ```
 
+systemd reports the same boot as a 32-hex ID in `journalctl` and as a dashed
+UUID through `/proc`, so a listener capture and a later reconstruction can
+coexist. Both files are kept. `bin/qa shutdown --list` prints the authoritative
+record first and marks the other copies `[redundant]`; `qa status` reads the
+primary record. A live listener capture wins over a reconstruction, and legacy
+files without an `origin` field fall back to the earlier `captured_ts`. Replay
+still walks both files, but identical fingerprints are inserted once.
+
 ## Redaction paths
 
 Captured issues are redacted before they are written. Choose a profile with

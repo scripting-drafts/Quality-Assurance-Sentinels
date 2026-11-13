@@ -161,6 +161,7 @@ class CaptureTests(unittest.TestCase):
                 self.assertTrue(path.exists())
                 self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
                 self.assertEqual(shutdown.load("boot-1")["count"], 1)
+                self.assertEqual(shutdown.load("boot-1")["origin"], "listener")
 
 
 class PersistTests(unittest.TestCase):
@@ -191,6 +192,7 @@ class PersistTests(unittest.TestCase):
                 self.assertTrue(path.exists())
                 self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
                 self.assertEqual(shutdown.load(BOOT_ID)["boot_id"], BOOT_ID)
+                self.assertEqual(shutdown.load(BOOT_ID)["origin"], "reconstructed")
 
     def test_persist_keeps_existing_listener_capture(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,6 +219,117 @@ class InstallUnitTests(unittest.TestCase):
         text = script.read_text(encoding="utf-8")
         self.assertIn("Before=final.target", text)
         self.assertIn("WantedBy=final.target", text)
+
+
+class RecordsTests(unittest.TestCase):
+    def _write(self, directory, boot_id, captured_ts, origin=None, count=1):
+        record = {
+            "schema_version": shutdown.SCHEMA_VERSION,
+            "boot_id": boot_id,
+            "captured_ts": captured_ts,
+            "redaction": "strict",
+            "phases": {
+                "boot": {"count": 0, "signatures": 0, "start": "", "end": ""},
+                "shutdown": {"count": 0, "signatures": 0, "start": "", "end": ""},
+            },
+            "count": count,
+            "errors": [],
+            "window_start": "",
+            "window_end": "",
+        }
+        if origin:
+            record["origin"] = origin
+        path = directory / f"{boot_id}.json"
+        path.write_text(json.dumps(record))
+        return path
+
+    def test_duplicate_id_spellings_tag_reconstruction_redundant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "shutdown"
+            directory.mkdir()
+            self._write(
+                directory, "a6f19b81-cd1b-4a25-9431-e7d3b71429a8",
+                "2026-11-13T11:03:28Z",
+            )
+            self._write(
+                directory, "a6f19b81cd1b4a259431e7d3b71429a8",
+                "2026-11-13T11:04:01Z",
+            )
+            with mock.patch.object(config, "SHUTDOWN_DIR", directory):
+                rows = shutdown.records()
+            self.assertEqual(len(rows), 2)
+            self.assertFalse(rows[0]["redundant"])
+            self.assertEqual(
+                rows[0]["boot_id"], "a6f19b81-cd1b-4a25-9431-e7d3b71429a8"
+            )
+            self.assertTrue(rows[1]["redundant"])
+            self.assertEqual(rows[1]["redundant_of"], rows[0]["boot_id"])
+
+    def test_listener_origin_wins_even_with_a_later_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "shutdown"
+            directory.mkdir()
+            self._write(
+                directory, "a6f19b81-cd1b-4a25-9431-e7d3b71429a8",
+                "2026-11-13T11:04:01Z", origin="listener",
+            )
+            self._write(
+                directory, "a6f19b81cd1b4a259431e7d3b71429a8",
+                "2026-11-13T11:03:28Z", origin="reconstructed",
+            )
+            with mock.patch.object(config, "SHUTDOWN_DIR", directory):
+                rows = shutdown.records()
+            self.assertEqual(rows[0]["origin"], "listener")
+            self.assertFalse(rows[0]["redundant"])
+            self.assertTrue(rows[1]["redundant"])
+
+    def test_limit_returns_the_primary_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "shutdown"
+            directory.mkdir()
+            self._write(
+                directory, "a6f19b81-cd1b-4a25-9431-e7d3b71429a8",
+                "2026-11-13T11:03:28Z",
+            )
+            self._write(
+                directory, "a6f19b81cd1b4a259431e7d3b71429a8",
+                "2026-11-13T11:04:01Z",
+            )
+            with mock.patch.object(config, "SHUTDOWN_DIR", directory):
+                rows = shutdown.records(limit=1)
+            self.assertEqual(len(rows), 1)
+            self.assertFalse(rows[0]["redundant"])
+
+    def test_distinct_boots_are_not_tagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "shutdown"
+            directory.mkdir()
+            self._write(directory, BOOT_ID, "2026-11-13T11:03:28Z")
+            self._write(
+                directory, "fedcba9876543210fedcba9876543210",
+                "2026-11-13T11:04:01Z",
+            )
+            with mock.patch.object(config, "SHUTDOWN_DIR", directory):
+                rows = shutdown.records()
+            self.assertEqual(len(rows), 2)
+            self.assertFalse(rows[0]["redundant"])
+            self.assertFalse(rows[1]["redundant"])
+
+    def test_list_output_marks_redundant_records(self):
+        import contextlib
+        import io
+
+        from sentinels import cli
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._print_shutdown({
+                "boot_id": "a6f19b81cd1b4a259431e7d3b71429a8",
+                "phases": {},
+                "count": 0,
+                "redundant": True,
+            })
+        self.assertIn("[redundant]", buf.getvalue())
 
 
 class ReplayTests(unittest.TestCase):

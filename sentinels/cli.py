@@ -466,7 +466,8 @@ def _print_shutdown(record: dict) -> None:
     else:
         detail = f"{int(record.get('count') or 0)} shutdown error(s)"
     mode = record.get("redaction") or config.CAPTURE_REDACTION
-    print(f"boot {boot_id}: {detail}; redaction={mode}")
+    marker = " [redundant]" if record.get("redundant") else ""
+    print(f"boot {boot_id}: {detail}; redaction={mode}{marker}")
     for item in (record.get("errors") or [])[:50]:
         phase = item.get("phase") or "shutdown"
         count = int(item.get("count") or 1)

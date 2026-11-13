@@ -321,6 +321,30 @@ def _scan(boot_ref: str, boot_id: str = "") -> dict:
 
 
 # ---------------------------------------------------------------- storage
+def _canonical_boot_id(boot_id) -> str:
+    """Return the dash-less lowercase form shared by both systemd ID spellings."""
+    return str(boot_id or "").strip().lower().replace("-", "")
+
+
+def _primary_record(group: list[tuple]) -> dict:
+    """Pick the authoritative capture from one boot's duplicate files.
+
+    A live listener capture wins over a reconstruction.  Legacy files predate
+    the ``origin`` field, so the earlier ``captured_ts`` is used instead: the
+    listener writes at shutdown, the reconstruction writes after the next boot.
+    """
+    def rank(item):
+        _path, mtime, record = item
+        origin = str(record.get("origin") or "")
+        return (
+            0 if origin == "listener" else 1,
+            str(record.get("captured_ts") or "9999-12-31T23:59:59Z"),
+            mtime,
+        )
+
+    return min(group, key=rank)[2]
+
+
 def _path(boot_id: str):
     return config.SHUTDOWN_DIR / f"{boot_id}.json"
 
@@ -377,6 +401,7 @@ def _empty(boot_id: str = "") -> dict:
 def capture(boot_ref: str = "0") -> dict:
     """Scan the current boot and persist its boot and shutdown failures."""
     record = _scan(str(boot_ref), _current_boot_id())
+    record["origin"] = "listener"
     if record["boot_id"]:
         _write(record)
     return record
@@ -401,6 +426,7 @@ def persist(record: dict, overwrite: bool = False) -> bool:
         return False
     stored = dict(record)
     stored["boot_id"] = boot_id
+    stored.setdefault("origin", "reconstructed")
     if not stored.get("captured_ts"):
         stored["captured_ts"] = iso()
     _write(stored)
@@ -425,6 +451,13 @@ def scan_boot(
 
 
 def records(limit: int = 20) -> list[dict]:
+    """Load captures newest first, tagging duplicate boot IDs as redundant.
+
+    systemd exposes the same boot as a 32-hex ID in journalctl and as a dashed
+    UUID through ``/proc``.  A listener capture and a later reconstruction can
+    therefore coexist.  Neither file is removed: the primary record is listed
+    first and the other copies carry ``redundant=True``.
+    """
     try:
         paths = sorted(
             config.SHUTDOWN_DIR.glob("*.json"),
@@ -433,15 +466,38 @@ def records(limit: int = 20) -> list[dict]:
         )
     except OSError:
         return []
-    out = []
-    for path in paths[:limit]:
+    loaded = []
+    for path in paths:
         try:
+            mtime = path.stat().st_mtime
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(record, dict):
-            out.append(record)
-    return out
+            loaded.append((path, mtime, record))
+
+    groups: dict[str, list[tuple]] = {}
+    order: list[str] = []
+    for item in loaded:
+        key = _canonical_boot_id(item[2].get("boot_id")) or f"file:{item[0]}"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(item)
+
+    out = []
+    for key in order:
+        group = groups[key]
+        primary = _primary_record(group)
+        for _path, _mtime, record in group:
+            record["redundant"] = record is not primary
+            if record is not primary:
+                record["redundant_of"] = str(primary.get("boot_id") or "")
+        out.append(primary)
+        out.extend(
+            record for _path, _mtime, record in group if record is not primary
+        )
+    return out[:limit]
 
 
 def prune() -> int:

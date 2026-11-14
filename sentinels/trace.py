@@ -53,7 +53,7 @@ def resolve(conn, query: str, limit: int = 200) -> dict:
     ]
     out["crashes"] = [
         dict(r) for r in conn.execute(
-            "SELECT ts, comm, exe, sig, cpus_allowed, core2_involved, fingerprint"
+            "SELECT ts, comm, exe, sig, cpus_allowed, faultcore_involved, fingerprint"
             " FROM crashes WHERE sig LIKE ? OR comm LIKE ? OR exe LIKE ?"
             " ORDER BY ts DESC LIMIT ?",
             (like, like, like, limit),
@@ -128,7 +128,7 @@ def render(conn, query: str, limit: int = 50) -> list[str]:
         for c in record["crashes"]:
             lines.append(
                 f"- {c['ts']} {c['comm'] or c['exe']} {c['sig']} "
-                f"cpus={c['cpus_allowed'] or 'unknown'} core2={c['core2_involved']}"
+                f"cpus={c['cpus_allowed'] or 'unknown'} fault_core={c['faultcore_involved']}"
             )
         lines.append("")
 

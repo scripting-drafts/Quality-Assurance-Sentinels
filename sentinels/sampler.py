@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from . import config, db
+from . import config, db, faultcore
 from .util import iso, run
 
 
@@ -16,6 +16,7 @@ def take_sample(conn) -> dict:
     if rc != 0 or not out.strip():
         raise SampleError(f"qa_sample failed rc={rc}: {err.strip()[:400]}")
     data = json.loads(out)
+    data["faultcore"] = faultcore.topology()
     ts = data.get("ts") or iso()
 
     conn.execute(

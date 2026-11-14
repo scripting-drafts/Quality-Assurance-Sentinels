@@ -48,7 +48,7 @@ Run `./bin/qa --help` for the full command list and `./bin/qa <command> --help` 
 | `tickets/raise/` | Drafts judged ready for human review/submission |
 | `tickets/standby/` | Lower-confidence or deferred drafts |
 | `tickets/rejected/` | Reports explained by a held, outdated local build |
-| `triage/core2/` | Core-2 cases, deep-trace requests, and results |
+| `triage/faultcore/` | Fault-core cases, deep-trace requests, and results |
 | `config/` | Settings documentation and optional reporter identity |
 
 These directories are created by initialization as needed. The project uses local files; **ticket drafts are not automatically published**.
@@ -63,8 +63,8 @@ Examples:
 # Broader collection: more information and higher storage usage.
 QA_FULL_CAPTURE=1 ./bin/qa cycle
 
-# Change the monitored physical core or its logical CPU mapping if needed.
-QA_CORE2_ID=2 QA_CORE2_CPUS=2,8 ./bin/qa cycle
+# The fault core comes from /etc/faultlab/config; override its CPU set if needed.
+QA_FAULT_CORE_CPUS=3,9 ./bin/qa cycle
 ```
 
 The default retention configuration is bounded. A low-free-space guard can suspend ingestion instead of filling the disk. Unbounded collection (`QA_KEEP_FOREVER=1`, debug journal capture, unlimited evidence events) requires conscious capacity planning.

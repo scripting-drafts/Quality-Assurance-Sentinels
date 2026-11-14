@@ -14,7 +14,7 @@ class QueryEngineTests(unittest.TestCase):
         for index, (severity, status, rule) in enumerate((
             ("warning", "open", "memory.low"),
             ("error", "open", "systemd.service_start"),
-            ("critical", "investigating", "crash.core2"),
+            ("critical", "investigating", "crash.faultcore"),
             ("error", "resolved", "journal.critical"),
         )):
             conn.execute(
@@ -38,7 +38,7 @@ class QueryEngineTests(unittest.TestCase):
             "inventory-items": "inventory",
             "inventory-diffs": "inventory_diffs",
             "hardware-items": "hardware_items",
-            "core2": "core2_cases",
+            "faultcore": "faultcore_cases",
             "crosschecks": "crosschecks",
             "notifications": "notifications",
             "reports": "reports",

@@ -9,7 +9,7 @@ import os
 import re
 from datetime import timedelta
 
-from . import classify, config, core2, correlate, db, holds, packages
+from . import classify, config, faultcore, correlate, db, holds, packages
 from .util import (
     human_bytes, identity_for_ticket, iso, read_text, redact, run, sha256_text, utcnow,
 )
@@ -105,7 +105,7 @@ def _environment(topology: dict | None = None, issue: dict | None = None,
         if "=" in line:
             k, v = line.split("=", 1)
             os_release[k] = v.strip('"')
-    topo = topology or core2.topology()
+    topo = topology or faultcore.topology()
     software = software if software is not None else _software_versions(issue)
     cpu = ""
     for line in read_text("/proc/cpuinfo").splitlines():
@@ -128,7 +128,7 @@ def _environment(topology: dict | None = None, issue: dict | None = None,
         f"- OS: {os_release.get('PRETTY_NAME', 'Linux')}",
         f"- Kernel: {read_text('/proc/sys/kernel/osrelease')}",
         f"- CPU: {cpu or 'unknown'} ({topo.get('logical_cpus') or os.cpu_count()} logical CPUs)",
-        f"- Physical core 2: {core2.presence(topo)}",
+        f"- {faultcore.display_label(topo)}: {faultcore.presence(topo)}",
         f"- Memory: {human_bytes(mem_kb)}",
     ]
     for item in software:
@@ -153,43 +153,60 @@ def _environment(topology: dict | None = None, issue: dict | None = None,
 
 
 def _repro_block(vendor: str, topology: dict | None = None) -> list[str]:
-    topo = topology or core2.topology()
+    topo = topology or faultcore.topology()
     present = topo.get("present") is True
-    siblings = ",".join(map(str, topo.get("logical") or [])) or "2,8"
+    undetermined = topo.get("present") is None
+    core = faultcore.label(topo)
+    status = faultcore.presence(topo)
+    siblings = ",".join(map(str, topo.get("logical") or []))
+    if not siblings:
+        siblings = ",".join(str(cpu) for cpu in config.FAULT_CORE_CPUS) or "unavailable"
+    control = ",".join(str(cpu) for cpu in config.CONTROL_CPUS) or "0"
     if vendor == "mozilla":
         if present:
             pin = (
-                "2. Pin the browser to the SMT siblings of physical core 2: "
+                f"2. Pin the browser to the SMT siblings of {core}: "
                 f"`taskset -c {siblings} firefox-esr --no-remote --new-instance`."
             )
-            control = "4. Control run: same steps pinned to another physical core (e.g. `taskset -c 0,6`)."
-        else:
-            pin = (
-                "2. Physical core 2 is "
-                f"{core2.presence(topo)}; pin the browser to an available core "
-                "(e.g. `taskset -c 0`) and record that core-2 comparison was not possible."
+            control_step = (
+                f"4. Control run: same steps pinned to another physical core "
+                f"(e.g. `taskset -c {control}`)."
             )
-            control = "4. Use the same available-core run as the control; state the core-2 absence in the report."
+        else:
+            outcome = "undetermined" if undetermined else "absent"
+            pin = (
+                f"2. {faultcore.display_label(topo)} is {status}; pin the browser to an available "
+                f"core (e.g. `taskset -c {control}`) and record that the fault-core "
+                f"comparison was {outcome}."
+            )
+            control_step = (
+                "4. Use the same available-core run as the control; state that the "
+                "fault-core comparison was not possible."
+            )
         return [
             "1. Use a fresh Firefox profile (never a logged-in profile).",
             pin,
             "3. Load the page that triggered WebRender/compositor work until the tab or GPU process crashes.",
-            control,
+            control_step,
             "5. Compare `about:crashes` minidumps and the sentinel crash table.",
         ]
     if vendor == "canonical-kernel":
         if present:
             core_test = (
-                f"2. Run the core-2 live test from a disposable live USB: "
-                f"`~/core2/verify-core2-live.sh` (logical CPUs {siblings})."
+                f"2. Run the fault-core live test from a disposable live USB: "
+                f"`~/faultcore/verify-faultcore-live.sh` (logical CPUs {siblings})."
             )
             compare = "3. Compare suspect against a control core for equal duration."
         else:
+            outcome = "undetermined" if undetermined else "absent"
             core_test = (
-                "2. Physical core 2 is "
-                f"{core2.presence(topo)}; run the workload on available cores and record the absence."
+                f"2. {faultcore.display_label(topo)} is {status}; run the workload on available "
+                f"cores and record that the fault-core comparison was {outcome}."
             )
-            compare = "3. Use one available core as the control; do not claim a core-2 comparison."
+            compare = (
+                "3. Use one available core as the control; do not claim a fault-core "
+                "comparison."
+            )
         return [
             "1. Reproduce the workload on the installed system; keep the sentinel running.",
             core_test,
@@ -205,14 +222,15 @@ def _repro_block(vendor: str, topology: dict | None = None) -> list[str]:
     if vendor == "hardware":
         if present:
             stress = (
-                f"2. From a disposable live USB, stress physical core 2 "
-                f"(`{siblings}`) and a control core (`0,6`)."
+                f"2. From a disposable live USB, stress {core} "
+                f"(`{siblings}`) and a control core (`{control}`)."
             )
         else:
+            outcome = "undetermined" if undetermined else "absent"
             stress = (
-                "2. Physical core 2 is "
-                f"{core2.presence(topo)}; stress the available cores and record the absence "
-                "instead of claiming a core-2 comparison."
+                f"2. {faultcore.display_label(topo)} is {status}; stress the available cores and "
+                f"record that the fault-core comparison was {outcome} instead of "
+                "claiming one."
             )
         return [
             "1. The sentinel records per-core affinity and crash correlation continuously.",
@@ -337,7 +355,7 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
     for c in crashes:
         blob = " ".join(str(c.get(k) or "") for k in ("comm", "exe", "sig", "context"))
         vendor = classify.vendor_for(blob)
-        if c.get("core2_involved") == 1 and vendor == "local":
+        if c.get("faultcore_involved") == 1 and vendor == "local":
             vendor = "hardware"
         sig = f"{c.get('comm') or c.get('exe')} {c.get('sig')}"
         add(vendor, sig, "crash", c)
@@ -361,21 +379,21 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
         )
         add(vendor, sig, "finding", row)
 
-    # dedicated hardware ticket: core-2 correlation must reach the platform vendor
-    core2_crashes = [c for c in crashes if c.get("core2_involved") == 1]
-    if core2_crashes:
-        key = sha256_text("hardware|core2-correlation")[:20]
+    # dedicated hardware ticket: fault-core correlation must reach the platform vendor
+    faultcore_crashes = [c for c in crashes if c.get("faultcore_involved") == 1]
+    if faultcore_crashes:
+        key = sha256_text("hardware|faultcore-correlation")[:20]
         issues[key] = {
             "key": key,
             "vendor": "hardware",
-            "signature": "crashes correlated with physical core 2 affinity",
-            "display": "crashes correlated with physical core 2 affinity",
+            "signature": "crashes correlated with fault-core affinity",
+            "display": "crashes correlated with fault-core affinity",
             "kind": "correlation",
-            "rows": core2_crashes,
-            "count": len(core2_crashes),
+            "rows": faultcore_crashes,
+            "count": len(faultcore_crashes),
             "severity": "critical",
-            "first": min(c["ts"] for c in core2_crashes),
-            "last": max(c["ts"] for c in core2_crashes),
+            "first": min(c["ts"] for c in faultcore_crashes),
+            "last": max(c["ts"] for c in faultcore_crashes),
         }
 
     result = [
@@ -397,27 +415,27 @@ def collect_issues(conn, days: int = 7, include_local: bool = False) -> list[dic
     return result
 
 
-def _mentions_core2(issue: dict) -> bool:
+def _mentions_faultcore(issue: dict) -> bool:
     text = f"{issue.get('signature') or ''} {issue.get('display') or ''}".lower()
-    if "core 2" in text or "core-2" in text:
+    if "fault core" in text or "fault-core" in text:
         return True
     if issue.get("kind") == "correlation":
         return True
     if issue.get("vendor") in ("mozilla", "canonical-kernel", "hardware"):
         return True
-    return any(row.get("core2_involved") is not None for row in issue.get("rows") or [])
+    return any(row.get("faultcore_involved") is not None for row in issue.get("rows") or [])
 
 
-def _core2_table(rows: list[dict], topology: dict | None = None) -> list[str]:
+def _faultcore_table(rows: list[dict], topology: dict | None = None) -> list[str]:
     crashed = [r for r in rows if "sig" in r]
     if not crashed:
         return ["No crash rows in this cluster."]
     lines = [
-        "| time (UTC) | process | signal | allowed CPUs | core 2 in mask |",
+        "| time (UTC) | process | signal | allowed CPUs | fault core in mask |",
         "|---|---|---|---|---|",
     ]
     for c in crashed[:25]:
-        verdict = {1: "yes", 0: "no", None: "unknown"}.get(c.get("core2_involved"), "unknown")
+        verdict = {1: "yes", 0: "no", None: "unknown"}.get(c.get("faultcore_involved"), "unknown")
         lines.append(
             f"| {c.get('ts')} | `{c.get('comm') or c.get('exe')}` | {c.get('sig')} | "
             f"`{c.get('cpus_allowed') or 'unknown'}` | {verdict} |"
@@ -428,15 +446,16 @@ def _core2_table(rows: list[dict], topology: dict | None = None) -> list[str]:
         "Unknown affinity is labelled unknown, not discarded. This correlation is part "
         "of the QA record and is included in every ticket.",
     ]
-    topo = topology or core2.topology()
+    topo = topology or faultcore.topology()
     if topo.get("present") is False:
         lines.append(
-            "Current host topology does not expose physical core 2; any `yes` rows "
-            "are historical or from a different topology."
+            f"Current host topology does not expose {faultcore.label(topo)}; any `yes` "
+            "rows are historical or from a different topology."
         )
     elif topo.get("present") is None:
         lines.append(
-            "Current host topology is unavailable; verdicts are taken from the recorded "
+            f"Current host topology cannot verify {faultcore.label(topo)} "
+            f"({topo.get('state') or 'unknown'}); verdicts are taken from the recorded "
             "affinity masks, not from a fresh CPU census."
         )
     return lines
@@ -444,15 +463,15 @@ def _core2_table(rows: list[dict], topology: dict | None = None) -> list[str]:
 
 def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> tuple[str, str]:
     meta = classify.VENDOR_META.get(issue["vendor"], classify.VENDOR_META["local"])
-    topo = core2.topology()
+    topo = faultcore.topology()
     software = _software_versions(issue)
     shown = issue.get("display") or issue["signature"]
     title = f"[QA] {meta['component']}: {shown[:120]}"
     version_tag = _version_tag(issue, software)
     if version_tag:
         title = f"{title} {version_tag}"
-    if _mentions_core2(issue):
-        title = f"{title} [{core2.theme_tag(topo)}]"
+    if _mentions_faultcore(issue):
+        title = f"{title} [{faultcore.theme_tag(topo)}]"
     rows = issue["rows"]
     example = ""
     if rows:
@@ -462,7 +481,7 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
         f"# {title}",
         "",
         "> **DRAFT ONLY — NOT SUBMITTED.** Review, attach the evidence bundle, then post",
-        f"> through {meta['channel']}. Remove nothing from the physical-core evidence section.",
+        f"> through {meta['channel']}. Remove nothing from the fault-core evidence section.",
         "",
         f"- Vendor / channel: **{meta['name']}** — {meta['channel']}",
         f"- Cluster key: `{issue['key']}`",
@@ -515,9 +534,9 @@ def _draft(issue: dict, bundle: dict | None, identity: dict, consent: bool) -> t
     if issue.get("notes"):
         lines += ["## Consistency", "", issue["notes"], ""]
     lines += [
-        f"## Physical core 2 correlation — {core2.presence(topo)}",
+        f"## {faultcore.display_label(topo)} correlation — {faultcore.presence(topo)}",
         "",
-        *_core2_table(rows, topo),
+        *_faultcore_table(rows, topo),
         "",
         "## Reproduction",
         "",

@@ -125,7 +125,7 @@ def _trace_root() -> str | None:
 def summarize_trace(text: str) -> dict:
     by_cpu: dict[int, int] = {}
     by_event: dict[str, int] = {}
-    comms_core2: dict[str, int] = {}
+    comms_faultcore: dict[str, int] = {}
     lines = 0
     page_faults = 0
     for line in text.splitlines():
@@ -140,18 +140,18 @@ def summarize_trace(text: str) -> dict:
         by_event[event] = by_event.get(event, 0) + 1
         if "page_fault" in event:
             page_faults += 1
-        if cpu in config.CORE2_CPUS:
-            comms_core2[comm] = comms_core2.get(comm, 0) + 1
+        if cpu in config.FAULT_CORE_CPUS:
+            comms_faultcore[comm] = comms_faultcore.get(comm, 0) + 1
     total = sum(by_cpu.values()) or 1
     return {
         "lines": lines,
         "by_cpu": {str(k): v for k, v in sorted(by_cpu.items())},
         "by_event": by_event,
         "page_faults": page_faults,
-        "core2_event_pct": round(100.0 * sum(
-            v for c, v in by_cpu.items() if c in config.CORE2_CPUS
+        "faultcore_event_pct": round(100.0 * sum(
+            v for c, v in by_cpu.items() if c in config.FAULT_CORE_CPUS
         ) / total, 1),
-        "top_core2_comms": sorted(comms_core2.items(), key=lambda kv: (-kv[1], kv[0]))[:15],
+        "top_faultcore_comms": sorted(comms_faultcore.items(), key=lambda kv: (-kv[1], kv[0]))[:15],
     }
 
 
@@ -201,7 +201,7 @@ def _collect_context(conn, outdir, request: dict) -> None:
 
     if request.get("case_id"):
         case = conn.execute(
-            "SELECT * FROM core2_cases WHERE id=?", (request["case_id"],)
+            "SELECT * FROM faultcore_cases WHERE id=?", (request["case_id"],)
         ).fetchone()
         if case:
             _write(outdir, "case.json", dict(case))
@@ -477,7 +477,7 @@ def run_request(conn, request: dict, duration: int | None = None,
     if trace.get("available"):
         report_lines += [
             f"- Lines captured: **{trace['lines']}**; page faults: **{trace['page_faults']}**",
-            f"- Share of events on core-2 CPUs {config.CORE2_CPUS}: **{trace['core2_event_pct']}%**",
+            f"- Share of events on fault-core CPUs {config.FAULT_CORE_CPUS}: **{trace['faultcore_event_pct']}%**",
             f"- Events enabled: {', '.join(trace.get('events_enabled') or []) or 'none'}",
             "",
             "| CPU | events |",
@@ -485,8 +485,8 @@ def run_request(conn, request: dict, duration: int | None = None,
         ]
         for cpu, count in trace.get("by_cpu", {}).items():
             report_lines.append(f"| {cpu} | {count} |")
-        report_lines += ["", "Top comms on core-2 CPUs:", ""]
-        for comm, count in trace.get("top_core2_comms", [])[:10]:
+        report_lines += ["", "Top comms on fault-core CPUs:", ""]
+        for comm, count in trace.get("top_faultcore_comms", [])[:10]:
             report_lines.append(f"- `{comm}`: {count}")
     else:
         report_lines.append(f"_Unavailable: {trace.get('reason')}_")
@@ -502,15 +502,15 @@ def run_request(conn, request: dict, duration: int | None = None,
     if ebpf.get("available") and ebpf_data:
         totals = ebpf_data.get("totals", {})
         per_cpu = ebpf_data.get("per_cpu") or []
-        core2_rows = [r for r in per_cpu if r.get("cpu") in config.CORE2_CPUS]
-        core2_switches = sum(r.get("switches", 0) for r in core2_rows)
+        faultcore_rows = [r for r in per_cpu if r.get("cpu") in config.FAULT_CORE_CPUS]
+        faultcore_switches = sum(r.get("switches", 0) for r in faultcore_rows)
         total_switches = totals.get("switches", 0) or 0
-        share = round(100.0 * core2_switches / total_switches, 1) if total_switches else 0
+        share = round(100.0 * faultcore_switches / total_switches, 1) if total_switches else 0
         report_lines += [
             f"- Scheduler switches: **{totals.get('switches', 0)}**; "
             f"wakeups: **{totals.get('wakeups', 0)}**; "
             f"page faults: **{totals.get('page_faults', 0)}**",
-            f"- Core-2 CPUs {config.CORE2_CPUS}: **{core2_switches}** switches "
+            f"- Fault-core CPUs {config.FAULT_CORE_CPUS}: **{faultcore_switches}** switches "
             f"(**{share}%** of all)",
             f"- Programs attached: {ebpf_data.get('attached', 0)}; CPUs: {ebpf_data.get('cpus', 0)}",
             "",
@@ -556,7 +556,7 @@ def run_request(conn, request: dict, duration: int | None = None,
         "summary": {
             "status": status,
             "trace": trace.get("lines"),
-            "core2_event_pct": trace.get("core2_event_pct"),
+            "faultcore_event_pct": trace.get("faultcore_event_pct"),
             "page_faults": trace.get("page_faults"),
             "ebpf_totals": (ebpf or {}).get("data", {}).get("totals"),
         },
@@ -573,7 +573,7 @@ def run_request(conn, request: dict, duration: int | None = None,
         (iso(), case_id, request.get("finding_id"), status, request.get("reason"), duration,
          request.get("pid"), request.get("comm"), str(outdir), bundle_sha,
          json.dumps({"trace_lines": trace.get("lines"),
-                     "core2_pct": trace.get("core2_event_pct"),
+                     "faultcore_pct": trace.get("faultcore_event_pct"),
                      "ebpf_switches": (ebpf or {}).get("data", {}).get("totals", {}).get("switches"),
                      "skipped": skipped})),
     )
@@ -588,15 +588,15 @@ def run_request(conn, request: dict, duration: int | None = None,
 
 
 def _attach_to_case(conn, case_id: int, outdir, sha: str, trace: dict) -> None:
-    case = conn.execute("SELECT * FROM core2_cases WHERE id=?", (case_id,)).fetchone()
+    case = conn.execute("SELECT * FROM faultcore_cases WHERE id=?", (case_id,)).fetchone()
     if not case or not case["path"]:
         return
     section = (
         f"\n\n## Deep investigation {iso()}\n\n"
         f"- Artifacts: `{outdir}`\n"
         f"- SHA-256: `{sha}`\n"
-        f"- Trace lines: {trace.get('lines', 0)}; core-2 event share: "
-        f"{trace.get('core2_event_pct', 'n/a')}%\n"
+        f"- Trace lines: {trace.get('lines', 0)}; fault-core event share: "
+        f"{trace.get('faultcore_event_pct', 'n/a')}%\n"
         f"- Read `{outdir / 'REPORT.md'}` before drawing conclusions.\n"
     )
     path = case["path"]
@@ -611,7 +611,7 @@ def _write_deep_index(conn) -> None:
     lines = [
         "# Deep investigation runs",
         "",
-        "| run | case | status | trace lines | core-2 % | path |",
+        "| run | case | status | trace lines | fault-core % | path |",
         "|---|---|---|---|---|---|",
     ]
     for row in rows:
@@ -621,7 +621,8 @@ def _write_deep_index(conn) -> None:
             summary = {}
         lines.append(
             f"| {row['id']} | {row['case_id'] or '—'} | {row['status']} | "
-            f"{summary.get('trace_lines', '—')} | {summary.get('core2_pct', '—')} | "
+            f"{summary.get('trace_lines', '—')} | "
+            f"{summary.get('faultcore_pct', summary.get('core2_pct', '—'))} | "
             f"`{row['path']}` |"
         )
     config.DEEP_DIR.mkdir(parents=True, exist_ok=True)

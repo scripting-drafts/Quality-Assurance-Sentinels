@@ -1,10 +1,29 @@
 """Unit tests for the parts where a mistake would falsify QA evidence."""
 import json
 import unittest
+from unittest import mock
 
-from sentinels import classify
-from sentinels.ingest import core2_verdict, parse_cpu_list
+from sentinels import classify, config
+from sentinels.ingest import faultcore_verdict, parse_cpu_list
 from sentinels.util import redact
+
+
+_FAULT_CORE_PATCHES = []
+
+
+def setUpModule():
+    for name, value in (
+        ("FAULT_CORE_CPUS", (2, 8)),
+        ("FAULT_CORE_ENABLE", False),
+    ):
+        patcher = mock.patch.object(config, name, value)
+        patcher.start()
+        _FAULT_CORE_PATCHES.append(patcher)
+
+
+def tearDownModule():
+    for patcher in reversed(_FAULT_CORE_PATCHES):
+        patcher.stop()
 
 
 class CpuMaskTests(unittest.TestCase):
@@ -18,10 +37,10 @@ class CpuMaskTests(unittest.TestCase):
         self.assertIsNone(parse_cpu_list(""))
         self.assertIsNone(parse_cpu_list("n/a"))
 
-    def test_core2_verdict(self):
-        self.assertEqual(core2_verdict({2, 8}), 1)
-        self.assertEqual(core2_verdict({0, 6}), 0)
-        self.assertIsNone(core2_verdict(None))
+    def test_faultcore_verdict(self):
+        self.assertEqual(faultcore_verdict({2, 8}), 1)
+        self.assertEqual(faultcore_verdict({0, 6}), 0)
+        self.assertIsNone(faultcore_verdict(None))
 
 
 class ClassificationTests(unittest.TestCase):
@@ -144,19 +163,20 @@ class TicketCorrelationTests(unittest.TestCase):
     def _conn(self):
         import sqlite3
         from sentinels import db
+        from sentinels.util import iso
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.executescript(db.SCHEMA)
         conn.execute(
-            "INSERT INTO crashes(ts,pid,comm,exe,sig,corefile,cpus_allowed,core2_involved,context,fingerprint)"
+            "INSERT INTO crashes(ts,pid,comm,exe,sig,corefile,cpus_allowed,faultcore_involved,context,fingerprint)"
             " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            ("2026-11-02T20:00:00Z", 4242, "firefox-esr", "firefox-esr", "SIGSEGV",
+            (iso(), 4242, "firefox-esr", "firefox-esr", "SIGSEGV",
              "present", "2,8", 1, "WebRender crash", "test-fp"),
         )
         return conn
 
-    def test_core2_crash_reaches_both_owner_and_hardware_vendor(self):
+    def test_faultcore_crash_reaches_both_owner_and_hardware_vendor(self):
         from sentinels import tickets
 
         issues = tickets._collect_issues(self._conn(), days=7)
@@ -164,19 +184,19 @@ class TicketCorrelationTests(unittest.TestCase):
         self.assertIn("mozilla", vendors)
         self.assertIn("hardware", vendors)
 
-    def test_draft_keeps_core2_rows_and_withholds_identity(self):
+    def test_draft_keeps_faultcore_rows_and_withholds_identity(self):
         from sentinels import tickets
 
         issues = tickets._collect_issues(self._conn(), days=7)
         issue = next(i for i in issues if i["vendor"] == "hardware")
         title, body = tickets._draft(issue, None, {}, False)
-        self.assertIn("core 2", body.lower())
+        self.assertIn("fault core", body.lower())
         self.assertIn("| yes |", body)
         self.assertIn("withheld", body)
         self.assertNotIn("linkedin.com", body.lower())
 
 
-class Core2TriageTests(unittest.TestCase):
+class FaultcoreTriageTests(unittest.TestCase):
     def _conn(self):
         import sqlite3
         from sentinels import db
@@ -188,20 +208,20 @@ class Core2TriageTests(unittest.TestCase):
 
     def _crash(self, conn, fp, comm, mask, involved):
         conn.execute(
-            "INSERT INTO crashes(ts,pid,comm,exe,sig,corefile,cpus_allowed,core2_involved,context,fingerprint)"
+            "INSERT INTO crashes(ts,pid,comm,exe,sig,corefile,cpus_allowed,faultcore_involved,context,fingerprint)"
             " VALUES(?,?,?,?,?,?,?,?,?,?)",
             ("2026-11-02T20:00:00Z", 1, comm, comm, "SIGSEGV", "present",
              mask, involved, "ctx", fp),
         )
 
-    def test_event_regex_matches_core2_only(self):
-        from sentinels.triage import event_is_core2
+    def test_event_regex_matches_faultcore_only(self):
+        from sentinels.triage import event_is_faultcore
 
-        self.assertTrue(event_is_core2("mce: [Hardware Error]: CPU 2: Machine Check"))
-        self.assertTrue(event_is_core2("watchdog: BUG: soft lockup - CPU#2 stuck"))
-        self.assertTrue(event_is_core2("physical core 2 failed"))
-        self.assertFalse(event_is_core2("CPU 12 timed out"))
-        self.assertFalse(event_is_core2("event16 mouse lag"))
+        self.assertTrue(event_is_faultcore("mce: [Hardware Error]: CPU 2: Machine Check"))
+        self.assertTrue(event_is_faultcore("watchdog: BUG: soft lockup - CPU#2 stuck"))
+        self.assertTrue(event_is_faultcore("physical core 2 failed"))
+        self.assertFalse(event_is_faultcore("CPU 12 timed out"))
+        self.assertFalse(event_is_faultcore("event16 mouse lag"))
 
     def test_side_queue_keeps_confirmed_and_matching_controls(self):
         from sentinels import triage
@@ -279,7 +299,7 @@ class LayerTests(unittest.TestCase):
 
         conn = self._conn()
         conn.execute(
-            "INSERT INTO crashes(ts,pid,comm,exe,sig,corefile,cpus_allowed,core2_involved,context,fingerprint)"
+            "INSERT INTO crashes(ts,pid,comm,exe,sig,corefile,cpus_allowed,faultcore_involved,context,fingerprint)"
             " VALUES(datetime('now'),1,'firefox-esr','firefox-esr','SIGSEGV','present','2,8',1,'ctx','fp1')"
         )
         conn.execute(
@@ -297,7 +317,7 @@ class LayerTests(unittest.TestCase):
             (json.dumps(payload),),
         )
         rules = {f["rule"] for f in detect.scan(conn)}
-        for expected in ("crash.core2", "kernel.hardware", "memory.low",
+        for expected in ("crash.faultcore", "kernel.hardware", "memory.low",
                          "memory.pressure", "io.pressure", "thermal.high"):
             self.assertIn(expected, rules)
 
@@ -325,8 +345,8 @@ class LayerTests(unittest.TestCase):
         self.assertEqual(summary["lines"], 3)
         self.assertEqual(summary["by_cpu"]["2"], 2)
         self.assertEqual(summary["page_faults"], 1)
-        self.assertGreater(summary["core2_event_pct"], 60)
-        self.assertEqual(summary["top_core2_comms"][0][0], "firefox")
+        self.assertGreater(summary["faultcore_event_pct"], 60)
+        self.assertEqual(summary["top_faultcore_comms"][0][0], "firefox")
 
     def test_layer2_reports_privilege_honestly(self):
         from sentinels import deep
@@ -402,7 +422,7 @@ class DeploymentTests(unittest.TestCase):
         from sentinels import config
 
         script = (config.ROOT / "root" / "install-system.sh").read_text()
-        self.assertIn("PathExistsGlob=$ROOT/triage/core2/deep-requests/*.json", script)
+        self.assertIn("PathExistsGlob=$ROOT/triage/faultcore/deep-requests/*.json", script)
         self.assertEqual(config.DEEP_REQUEST_DIR, config.TRIAGE_DIR / "deep-requests")
 
     def test_single_installer_is_interactive_and_covers_both_layers(self):
@@ -1194,7 +1214,7 @@ class HeldPackageTests(unittest.TestCase):
         conn = self._conn()
         conn.execute(
             "INSERT INTO crashes(ts,pid,comm,exe,sig,corefile,cpus_allowed,"
-            "core2_involved,context,fingerprint) VALUES(datetime('now'),7,'nvidia-settings',"
+            "faultcore_involved,context,fingerprint) VALUES(datetime('now'),7,'nvidia-settings',"
             "'/usr/bin/nvidia-settings','SIGABRT','present','2,8',1,'ctx','fp-hold')"
         )
         hold = {"relevant": [], "mass_hold": False, "outdated": [
@@ -1218,7 +1238,7 @@ class HeldPackageTests(unittest.TestCase):
                  "outdated": True}]
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(config, "DEEP_REQUEST_DIR", pathlib.Path(tmp)):
-                path = deep.enqueue(conn, reason="auto:crash.core2", pid=1, comm="x",
+                path = deep.enqueue(conn, reason="auto:crash.faultcore", pid=1, comm="x",
                                     held_packages=held, hold_summary={"mass_hold": False})
                 request = json.loads(pathlib.Path(path).read_text())
         self.assertEqual(request["held_packages"], held)
@@ -2330,7 +2350,7 @@ class RejectedReportTests(unittest.TestCase):
             "rows": [{
                 "ts": ts, "pid": 7, "comm": "nvidia-settings",
                 "exe": "/usr/bin/nvidia-settings", "sig": "SIGABRT",
-                "cpus_allowed": "2,8", "core2_involved": 1, "context": "ctx",
+                "cpus_allowed": "2,8", "faultcore_involved": 1, "context": "ctx",
                 "boot_id": "bootA", "severity": "critical",
             }],
         }

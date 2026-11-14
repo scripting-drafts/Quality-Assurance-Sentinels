@@ -14,9 +14,9 @@ import time
 from datetime import datetime
 
 from . import (
-    boot, compat, config, correlate, crosscheck, db, deep, detect, evidence, hardware,
-    holds, ingest, inventory, logs, lsm, notify, posture, query, raise_ticket, report,
-    sampler, security, shutdown, tickets, trace, triage,
+    boot, compat, config, correlate, crosscheck, db, deep, detect, evidence, faultcore,
+    hardware, holds, ingest, inventory, logs, lsm, notify, posture, query, raise_ticket,
+    report, sampler, security, shutdown, tickets, trace, triage,
 )
 from .util import fmt_duration, iso, parse_iso, read_text, run, sha256_file, utcnow
 
@@ -62,7 +62,7 @@ def cmd_sample(args) -> int:
                     "boot_id": data.get("boot_id"),
                     "processes": len(data.get("procs", [])),
                     "cpus": len(data.get("cpus", [])),
-                    "core2_logical": data.get("core2", {}).get("logical"),
+                    "faultcore_logical": data.get("faultcore", {}).get("logical"),
                     "mem_available_kb": data.get("mem", {}).get("MemAvailable"),
                     "psi_cpu": data.get("psi", {}).get("cpu"),
                 },
@@ -340,7 +340,7 @@ def cmd_deep(args) -> int:
         }
         if args.case and not args.comm:
             case = conn.execute(
-                "SELECT * FROM core2_cases WHERE id=?", (args.case,)
+                "SELECT * FROM faultcore_cases WHERE id=?", (args.case,)
             ).fetchone()
             if case:
                 request["comm"] = case["process"]
@@ -391,7 +391,7 @@ def cmd_triage(args) -> int:
             print(f"case {row['id']}: {row['status']}")
             return 0
         if args.case is not None:
-            row = conn.execute("SELECT * FROM core2_cases WHERE id=?", (args.case,)).fetchone()
+            row = conn.execute("SELECT * FROM faultcore_cases WHERE id=?", (args.case,)).fetchone()
             if not row:
                 print(f"case {args.case} not found", file=sys.stderr)
                 return 1
@@ -641,7 +641,7 @@ def cmd_status(args) -> int:
         events = scalar("SELECT COUNT(*) FROM events")
         critical = scalar("SELECT COUNT(*) FROM events WHERE severity='critical'")
         crashes = scalar("SELECT COUNT(*) FROM crashes")
-        core2 = scalar("SELECT COUNT(*) FROM crashes WHERE core2_involved=1")
+        faultcore = scalar("SELECT COUNT(*) FROM crashes WHERE faultcore_involved=1")
         inv = conn.execute("SELECT * FROM inventory_runs ORDER BY id DESC LIMIT 1").fetchone()
         hw = conn.execute("SELECT * FROM hardware_runs ORDER BY id DESC LIMIT 1").fetchone()
         lsm_row = conn.execute("SELECT * FROM lsm_runs ORDER BY id DESC LIMIT 1").fetchone()
@@ -668,7 +668,7 @@ def cmd_status(args) -> int:
         else:
             print("  hardware tier : no runs yet (qa hardware collect)")
         print(f"  database      : {samples} samples, {events} events, {crashes} crashes")
-        print(f"  critical      : {critical} events; core-2-correlated crashes: {core2}")
+        print(f"  critical      : {critical} events; fault-core-correlated crashes: {faultcore}")
         if inv:
             print(f"  inventory     : run {inv['id']} at {inv['ts']} ({inv['counts']})")
             print(
@@ -678,7 +678,7 @@ def cmd_status(args) -> int:
         print(f"  evidence      : {bundles} bundles; chain head {chain_head[:90] or 'none'}")
         print(f"  ticket drafts : {drafts} (never auto-submitted)")
         tri = triage.summary(conn)
-        print(f"  core2 triage  : {tri['total']} cases {tri['by_status']} -> {config.TRIAGE_DIR}")
+        print(f"  fault-core    : {tri['total']} cases {tri['by_status']} -> {config.TRIAGE_DIR}")
         fcounts = conn.execute(
             "SELECT severity, COUNT(*) n FROM findings WHERE status='open' GROUP BY severity"
         ).fetchall()
@@ -759,11 +759,12 @@ def cmd_preflight(args) -> int:
     checks.append(("crontab", shutil.which("crontab") is not None, ""))
     free = shutil.disk_usage(str(config.ROOT)).free
     checks.append(("disk > 2 GiB free", free > 2 * 1024**3, f"{free / 1024**3:.1f} GiB"))
+    topo = faultcore.topology()
     checks.append(
         (
-            f"physical core {config.CORE2_PHYSICAL_ID} present",
-            bool(config.CORE2_CPUS),
-            f"logical CPUs {config.CORE2_CPUS}",
+            "fault core configured",
+            bool(config.FAULT_CORE_CPUS) or not config.FAULT_CORE_ENABLE,
+            faultcore.presence(topo),
         )
     )
     compatibility = compat.report()
@@ -783,7 +784,7 @@ def cmd_preflight(args) -> int:
             or "capabilities/sudo/root clean and baseline unchanged",
         )
     )
-    checks.append(("core2 triage dossier", config.TRIAGE_DIR.exists(), str(config.TRIAGE_DIR)))
+    checks.append(("fault-core triage dossier", config.TRIAGE_DIR.exists(), str(config.TRIAGE_DIR)))
     failed = 0
     for name, ok, detail in checks:
         print(f"[{'ok' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail and not ok else ""))
@@ -820,7 +821,7 @@ def _layer2_state() -> dict:
     path_unit = read_text(DEEP_PATH_UNIT)
     installed = (
         f"ExecStart={root}/bin/qa deep --consume" in service
-        and f"PathExistsGlob={root}/triage/core2/deep-requests/*.json" in path_unit
+        and f"PathExistsGlob={root}/triage/faultcore/deep-requests/*.json" in path_unit
     )
     rc, out, _ = run(["systemctl", "is-active", "qa-sentinel-deep.path"], timeout=10)
     active = rc == 0 and out.strip() == "active"
@@ -1107,7 +1108,7 @@ def cmd_cycle(args) -> int:
                 result["auto_ticket_error"] = str(exc)[:300]
                 db.record_run(conn, "cycle/tickets", False, str(exc))
 
-        # Core-2 side queue: refresh after new evidence or at least every 10 min.
+        # Fault-core side queue: refresh after new evidence or at least every 10 min.
         last_tri = db.meta_get(conn, "last_triage_run")
         tri_age = (utcnow() - parse_iso(last_tri)).total_seconds() if last_tri else 1e9
         if new_crashes or new_critical or tri_age >= 600:
@@ -1491,7 +1492,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="rotate var/cron.log now if it reached the size cap")
     s.set_defaults(func=cmd_logs)
 
-    s = sub.add_parser("triage", help="core-2 side queue: refresh/list/update cases")
+    s = sub.add_parser("triage", help="fault-core side queue: refresh/list/update cases")
     s.add_argument("--list", action="store_true", help="list without refreshing from sources")
     s.add_argument("--case", type=int, help="show one case file")
     s.add_argument("--set-status", choices=triage.STATUSES, help="update a case status")
@@ -1592,7 +1593,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser(
         "preflight",
-        help="check sampler, journal, coredump, disk, core-2 and layer-2 prerequisites",
+        help="check sampler, journal, coredump, disk, fault-core and layer-2 prerequisites",
     )
     s.set_defaults(func=cmd_preflight)
 

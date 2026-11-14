@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from . import boot, classify, config, core2, db, holds, triage
+from . import boot, classify, config, faultcore, db, holds, triage
 from .util import iso, parse_iso, sha256_text, utcnow
 
 # journal rules, highest severity first
@@ -99,9 +99,9 @@ def _crash_findings(conn, since: str) -> list[dict]:
     ):
         row = dict(row)
         subject = row["comm"] or row["exe"] or "unknown"
-        if row["core2_involved"] == 1:
-            rule, severity = "crash.core2", "critical"
-        elif row["core2_involved"] is None and triage._browserish(row):
+        if row["faultcore_involved"] == 1:
+            rule, severity = "crash.faultcore", "critical"
+        elif row["faultcore_involved"] is None and triage._browserish(row):
             rule, severity = "crash.affinity_unknown", "warning"
         else:
             continue
@@ -124,7 +124,7 @@ def _crash_findings(conn, since: str) -> list[dict]:
                 "severity": severity,
                 "subject": subject,
                 "detail": f"{row['sig']} affinity={row['cpus_allowed'] or 'unknown'} "
-                          f"core2={row['core2_involved']}{held_note}",
+                          f"fault_core={row['faultcore_involved']}{held_note}",
                 "case_id": _case_id(conn, subject),
             }
         )
@@ -272,7 +272,7 @@ def scan(conn, hours: int = 24) -> list[dict]:
         _crash_findings(conn, since)
         + _event_findings(conn, since)
         + _sample_findings(conn)
-        + core2.findings(conn)
+        + faultcore.findings(conn)
         + boot.findings(conn, since)
     )
     new = []

@@ -5,7 +5,7 @@ import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from . import boot, config, db, deep, detect, hardware, lsm, posture, triage
+from . import boot, config, db, deep, detect, faultcore, hardware, lsm, posture, triage
 from .util import (
     fmt_duration, human_bytes, iso, parse_iso, read_text, redact,
     write_text_atomic,
@@ -66,7 +66,7 @@ def _sample_stats(conn, since_iso: str) -> dict:
     stats = {
         "samples": len(rows),
         "cpu": {"mean_busy": None, "max_busy": None, "mean_iowait": None, "max_iowait": None},
-        "core2": {"mean_busy": None, "max_busy": None},
+        "faultcore": {"mean_busy": None, "max_busy": None},
         "mem_available_min_kb": None,
         "swap_free_min_kb": None,
         "psi": {"cpu_max": None, "io_max": None, "memory_max": None, "memory_full_max": None},
@@ -78,7 +78,7 @@ def _sample_stats(conn, since_iso: str) -> dict:
         return stats
 
     payloads = [json.loads(r["payload"]) for r in rows]
-    busy_all, iowait_all, core2_busy = [], [], []
+    busy_all, iowait_all, faultcore_busy = [], [], []
     mem_min = swap_min = temp_max = load_max = None
     oom_first = oom_last = None
 
@@ -97,8 +97,8 @@ def _sample_stats(conn, since_iso: str) -> dict:
             iow = 100.0 * d["iowait"] / total
             busy_all.append(busy)
             iowait_all.append(iow)
-            if c["cpu"] in config.CORE2_CPUS:
-                core2_busy.append(busy)
+            if c["cpu"] in config.FAULT_CORE_CPUS:
+                faultcore_busy.append(busy)
 
     for p in payloads:
         mem = p.get("mem", {})
@@ -134,9 +134,9 @@ def _sample_stats(conn, since_iso: str) -> dict:
                 "mean_iowait": round(sum(iowait_all) / len(iowait_all), 1) if iowait_all else None,
                 "max_iowait": round(max(iowait_all), 1) if iowait_all else None,
             },
-            "core2": {
-                "mean_busy": round(sum(core2_busy) / len(core2_busy), 1) if core2_busy else None,
-                "max_busy": round(max(core2_busy), 1) if core2_busy else None,
+            "faultcore": {
+                "mean_busy": round(sum(faultcore_busy) / len(faultcore_busy), 1) if faultcore_busy else None,
+                "max_busy": round(max(faultcore_busy), 1) if faultcore_busy else None,
             },
             "mem_available_min_kb": mem_min,
             "swap_free_min_kb": swap_min,
@@ -221,20 +221,22 @@ def _lsm_section(conn) -> str:
     return "\n".join(lines)
 
 
-def _core2_section(conn, since_iso: str) -> str:
+def _faultcore_section(conn, since_iso: str) -> str:
     crashes = crashes_since(conn, since_iso)
-    yes = [c for c in crashes if c["core2_involved"] == 1]
-    no = [c for c in crashes if c["core2_involved"] == 0]
-    unknown = [c for c in crashes if c["core2_involved"] is None]
+    yes = [c for c in crashes if c["faultcore_involved"] == 1]
+    no = [c for c in crashes if c["faultcore_involved"] == 0]
+    unknown = [c for c in crashes if c["faultcore_involved"] is None]
+    topo = faultcore.topology()
 
     row = conn.execute("SELECT payload FROM samples ORDER BY ts DESC LIMIT 1").fetchone()
     current_line = "no sample yet"
     firefox_line = "no Firefox ESR process in the latest sample"
     if row:
         data = json.loads(row["payload"])
+        sample_topo = data.get("faultcore") or data.get("core2") or {}
         current_line = (
             f"online CPUs `{data.get('online_cpus')}`; "
-            f"core {config.CORE2_PHYSICAL_ID} logical CPUs `{data.get('core2', {}).get('logical')}`"
+            f"{faultcore.label(topo)} logical CPUs `{sample_topo.get('logical')}`"
         )
         ff = [p for p in data.get("procs", [])
               if "firefox" in (p.get("comm") or "").lower()
@@ -244,12 +246,12 @@ def _core2_section(conn, since_iso: str) -> str:
             firefox_line = "; ".join(f"`{m}` x{n}" for m, n in masks.most_common())
 
     lines = [
-        "## Physical core 2 evidence",
+        "## Fault core evidence",
         "",
         f"- Topology now: {current_line}.",
         f"- Firefox ESR affinity in latest sample: {firefox_line}.",
-        f"- Crashes in window: **{len(crashes)}** | affinity included core 2: **{len(yes)}** "
-        f"| excluded core 2: **{len(no)}** | unknown affinity: **{len(unknown)}**.",
+        f"- Crashes in window: **{len(crashes)}** | affinity included {faultcore.label(topo)}: "
+        f"**{len(yes)}** | excluded: **{len(no)}** | unknown affinity: **{len(unknown)}**.",
     ]
     if yes:
         lines.append("")
@@ -339,7 +341,7 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
         f"error {counts.get('error', 0)}, warning {counts.get('warning', 0)}); "
         f"{len(groups)} distinct signatures",
         f"- Crashes/coredumps/minidumps: **{len(crashes)}** "
-        f"(core-2 affinity {sum(1 for c in crashes if c['core2_involved'] == 1)})",
+        f"(fault-core affinity {sum(1 for c in crashes if c['faultcore_involved'] == 1)})",
         f"- CPU busy mean/max: **{_num(stats['cpu']['mean_busy'], '%')} / "
         f"{_num(stats['cpu']['max_busy'], '%')}**, iowait max {_num(stats['cpu']['max_iowait'], '%')}",
         f"- Memory available min: **{human_bytes(stats['mem_available_min_kb']) if stats['mem_available_min_kb'] is not None else 'n/a'}**; "
@@ -415,10 +417,10 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
 
     body += ["", "## Crashes", ""]
     if crashes:
-        body += ["| time (UTC) | process | signal | allowed CPUs | core 2 in mask |",
+        body += ["| time (UTC) | process | signal | allowed CPUs | fault core in mask |",
                  "|---|---|---|---|---|"]
         for c in crashes[:25]:
-            verdict = {1: "yes", 0: "no", None: "unknown"}[c["core2_involved"]]
+            verdict = {1: "yes", 0: "no", None: "unknown"}[c["faultcore_involved"]]
             body.append(
                 f"| {c['ts']} | `{c['comm'] or c['exe']}` | {c['sig']} | "
                 f"`{c['cpus_allowed'] or 'unknown'}` | {verdict} |"
@@ -426,7 +428,7 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
     else:
         body.append("_No crashes recorded in this window._")
 
-    body += ["", _core2_section(conn, since)]
+    body += ["", _faultcore_section(conn, since)]
     body += ["", _hardware_section(conn)]
     body += ["", _lsm_section(conn)]
 
@@ -434,11 +436,11 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
     tri_rows = triage.cases(conn, limit=12)
     body += [
         "",
-        "## Core-2 triage side queue",
+        "## Fault-core triage side queue",
         "",
         f"- Cases: **{tri['total']}** — by status `{tri['by_status']}`, "
         f"by verdict `{tri['by_verdict']}`",
-        f"- Dossier: [`../../triage/core2/index.md`](../../triage/core2/index.md) "
+        f"- Dossier: [`../../triage/faultcore/index.md`](../../triage/faultcore/index.md) "
         f"(one file per case, kept for investigation)",
         "",
     ]
@@ -446,17 +448,17 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
         body += ["| case | verdict | status | process | last event |", "|---|---|---|---|---|"]
         for row in tri_rows:
             body.append(
-                f"| [{row['id']}](../../triage/core2/case-{row['id']:04d}.md) | {row['verdict']} | "
+                f"| [{row['id']}](../../triage/faultcore/case-{row['id']:04d}.md) | {row['verdict']} | "
                 f"{row['status']} | `{row['process']}` | {row['event_ts']} |"
             )
     else:
         body.append(
-            "_No core-2 cases recorded yet. Confirmed, suspected, control and "
+            "_No fault-core cases recorded yet. Confirmed, suspected, control and "
             "unresolved-affinity events will appear here automatically._"
         )
     body += [
         "",
-        "Side-queue policy: core-2 cases are separated for focused investigation, "
+        "Side-queue policy: fault-core cases are separated for focused investigation, "
         "not removed from the main record or from vendor evidence.",
     ]
 
@@ -495,12 +497,12 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
         "## Layer 2 — deep investigation",
         "",
         f"- Pending requests: **{len(deep.pending_requests())}** "
-        f"(`triage/core2/deep-requests/`)",
+        f"(`triage/faultcore/deep-requests/`)",
         f"- Deep runs: **{conn.execute('SELECT COUNT(*) FROM deep_runs').fetchone()[0]}** "
-        f"(`triage/core2/deep/index.md`)",
+        f"(`triage/faultcore/deep/index.md`)",
     ]
     if deep_rows:
-        body += ["| run | case | status | trace lines | core-2 % | path |",
+        body += ["| run | case | status | trace lines | fault-core % | path |",
                  "|---:|---|---|---:|---:|---|"]
         for row in deep_rows:
             try:
@@ -509,7 +511,8 @@ def build_report(conn, kind: str = "daily", hours: int = 24) -> tuple[str, str]:
                 summary = {}
             body.append(
                 f"| {row['id']} | {row['case_id'] or '—'} | {row['status']} | "
-                f"{summary.get('trace_lines', '—')} | {summary.get('core2_pct', '—')} | "
+                f"{summary.get('trace_lines', '—')} | "
+                f"{summary.get('faultcore_pct', summary.get('core2_pct', '—'))} | "
                 f"`{row['path']}` |"
             )
     else:

@@ -43,6 +43,57 @@ def apply_settings_file(path=None) -> None:
 
 apply_settings_file()
 
+
+def _faultlab_values(path: pathlib.Path) -> dict[str, str]:
+    """Read faultlab's KEY=VALUE file without executing it."""
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
+            values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _cpu_tuple(value: str | None) -> tuple[int, ...]:
+    cpus: set[int] = set()
+    for part in (value or "").replace(" ", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            first, _, last = part.partition("-")
+            try:
+                cpus.update(range(int(first), int(last) + 1))
+            except ValueError:
+                continue
+            continue
+        try:
+            cpus.add(int(part))
+        except ValueError:
+            continue
+    return tuple(sorted(cpus))
+
+
+def _optional_int(value: str | None) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+FAULTLAB_CONFIG = pathlib.Path(
+    os.environ.get("QA_FAULTLAB_CONFIG", "/etc/faultlab/config")
+)
+_FAULTLAB = _faultlab_values(FAULTLAB_CONFIG)
+
 BIN = ROOT / "bin"
 VAR = ROOT / "var"
 DB_PATH = VAR / "sentinels.db"
@@ -74,7 +125,7 @@ DRAFT_DIR = TICKET_DIR / "drafts"
 RAISE_DIR = TICKET_DIR / "raise"
 STANDBY_DIR = TICKET_DIR / "standby"
 REJECT_DIR = TICKET_DIR / "rejected"
-TRIAGE_DIR = ROOT / "triage" / "core2"
+TRIAGE_DIR = ROOT / "triage" / "faultcore"
 DEEP_DIR = TRIAGE_DIR / "deep"
 DEEP_REQUEST_DIR = TRIAGE_DIR / "deep-requests"
 DEEP_ARCHIVE_DIR = TRIAGE_DIR / "deep-requests" / "archive"
@@ -83,7 +134,6 @@ IDENTITY_FILE = CONFIG_DIR / "identity.env"
 
 SAMPLE_BIN = BIN / "qa_sample"
 
-CORE2_PHYSICAL_ID = int(os.environ.get("QA_CORE2_ID", "2"))
 INVENTORY_INTERVAL_S = int(os.environ.get("QA_INVENTORY_INTERVAL_S", str(3 * 3600)))
 INVENTORY_MIN_S = int(os.environ.get("QA_INVENTORY_MIN_S", "900"))
 INVENTORY_MAX_S = int(os.environ.get("QA_INVENTORY_MAX_S", str(12 * 3600)))
@@ -110,16 +160,54 @@ PSI_MEMORY_FULL_ALERT = float(os.environ.get("QA_PSI_MEMORY_FULL_ALERT", "10"))
 MEM_AVAILABLE_ALERT_PCT = float(os.environ.get("QA_MEM_AVAILABLE_ALERT_PCT", "5"))
 TEMP_ALERT_C = float(os.environ.get("QA_TEMP_ALERT_C", "90"))
 IO_PRESSURE_ALERT = float(os.environ.get("QA_IO_PRESSURE_ALERT", "50"))
-CORE2_CPUS = tuple(int(x) for x in os.environ.get("QA_CORE2_CPUS", "2,8").split(",") if x)
-CORE2_ENABLE = os.environ.get("QA_CORE2_ENABLE", "1").lower() in ("1", "yes", "true", "on")
-CORE2_ENFORCE = os.environ.get("QA_CORE2_ENFORCE", "auto").lower()
-if CORE2_ENFORCE not in ("auto", "lab", "retired", "off"):
-    CORE2_ENFORCE = "auto"
-CORE2_MODE_FILE = pathlib.Path(os.environ.get("QA_CORE2_MODE_FILE", "/etc/faultlab/mode"))
-CORE2_CPU_ROOT = pathlib.Path(os.environ.get("QA_CORE2_CPU_ROOT", "/sys/devices/system/cpu"))
-CORE2_CGROUP_ROOT = pathlib.Path(os.environ.get("QA_CORE2_CGROUP_ROOT", "/sys/fs/cgroup"))
-CORE2_AB_RESULTS = pathlib.Path(os.environ.get(
-    "QA_CORE2_AB_RESULTS", "/var/log/faultlab/ab.jsonl"))
+FAULT_CPU = _optional_int(
+    os.environ.get("QA_FAULT_CPU") or _FAULTLAB.get("FAULT_CPU")
+)
+CONTROL_CPU = _optional_int(
+    os.environ.get("QA_CONTROL_CPU") or _FAULTLAB.get("CONTROL_CPU")
+)
+FAULT_CORE_CPUS = _cpu_tuple(
+    os.environ.get("QA_FAULT_CORE_CPUS")
+    or os.environ.get("QA_FAULT_CPUS")
+    or os.environ.get("QA_CORE2_CPUS")
+    or _FAULTLAB.get("FAULT_CPUS")
+)
+CONTROL_CPUS = _cpu_tuple(
+    os.environ.get("QA_CONTROL_CPUS") or _FAULTLAB.get("CONTROL_CPUS")
+)
+SAFE_CPUS = _cpu_tuple(
+    os.environ.get("QA_SAFE_CPUS") or _FAULTLAB.get("SAFE_CPUS")
+)
+FAULT_CORE_PHYSICAL_ID = _optional_int(
+    os.environ.get("QA_FAULT_CORE_PHYSICAL_ID")
+    or os.environ.get("QA_FAULT_CORE_ID")
+    or os.environ.get("QA_FAULT_PHYSICAL_ID")
+    or os.environ.get("QA_CORE2_ID")
+)
+_FAULT_CORE_ENABLE = os.environ.get(
+    "QA_FAULT_CORE_ENABLE", os.environ.get("QA_CORE2_ENABLE", "auto")
+).strip().lower()
+if _FAULT_CORE_ENABLE in ("auto", ""):
+    FAULT_CORE_ENABLE = bool(FAULT_CORE_CPUS)
+else:
+    FAULT_CORE_ENABLE = _FAULT_CORE_ENABLE in ("1", "yes", "true", "on")
+FAULT_CORE_ENFORCE = os.environ.get(
+    "QA_FAULT_CORE_ENFORCE", os.environ.get("QA_CORE2_ENFORCE", "auto")
+).strip().lower()
+if FAULT_CORE_ENFORCE not in ("auto", "lab", "retired", "off"):
+    FAULT_CORE_ENFORCE = "auto"
+FAULT_CORE_MODE_FILE = pathlib.Path(os.environ.get(
+    "QA_FAULT_CORE_MODE_FILE", os.environ.get("QA_CORE2_MODE_FILE", "/etc/faultlab/mode")
+))
+FAULT_CORE_CPU_ROOT = pathlib.Path(os.environ.get(
+    "QA_FAULT_CORE_CPU_ROOT", os.environ.get("QA_CORE2_CPU_ROOT", "/sys/devices/system/cpu")
+))
+FAULT_CORE_CGROUP_ROOT = pathlib.Path(os.environ.get(
+    "QA_FAULT_CORE_CGROUP_ROOT", os.environ.get("QA_CORE2_CGROUP_ROOT", "/sys/fs/cgroup")
+))
+FAULT_CORE_AB_RESULTS = pathlib.Path(os.environ.get(
+    "QA_FAULT_CORE_AB_RESULTS", os.environ.get("QA_CORE2_AB_RESULTS", "/var/log/faultlab/ab.jsonl")
+))
 
 # security provenance: live process scan every cycle, file ownership less often.
 SECURITY_FILE_SCAN_S = int(os.environ.get("QA_SECURITY_FILE_SCAN_S", "300"))

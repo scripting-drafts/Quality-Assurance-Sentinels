@@ -27,7 +27,7 @@ class SoftwareVersionTests(unittest.TestCase):
         topo = {"present": True, "logical": [2, 8], "physical_cores": 6,
                 "logical_cpus": 12, "physical_id": 2}
         with mock.patch.object(tickets.packages, "owner", return_value=owner), \
-             mock.patch.object(tickets.core2, "topology", return_value=topo):
+             mock.patch.object(tickets.faultcore, "topology", return_value=topo):
             title, body = tickets._draft(self._issue(), None, {}, False)
         self.assertIn("[firefox-esr 153.6.0esr~build2]", title)
         self.assertIn("- Software: `firefox-esr` 153.6.0esr~build2", body)
@@ -41,7 +41,7 @@ class SoftwareVersionTests(unittest.TestCase):
         topo = {"present": True, "logical": [2, 8], "physical_cores": 6,
                 "logical_cpus": 12, "physical_id": 2}
         with mock.patch.object(tickets.packages, "owner", return_value=owner), \
-             mock.patch.object(tickets.core2, "topology", return_value=topo):
+             mock.patch.object(tickets.faultcore, "topology", return_value=topo):
             _, body = tickets._draft(
                 self._issue("Firefox ESR 153.6.0esr~build2"), None, {}, False
             )

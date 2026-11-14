@@ -35,7 +35,7 @@ def _compact_samples(conn, since_iso: str) -> list[dict]:
                 "freq_mhz": p.get("freq_mhz"),
                 "thermal": p.get("thermal"),
                 "oom_kill": p.get("oom_kill"),
-                "core2": p.get("core2"),
+                "faultcore": p.get("faultcore") or p.get("core2"),
             }
         )
     return out
@@ -138,7 +138,7 @@ def make_bundle(conn, reason: str = "manual", hours: int = 24, make_tar: bool = 
             if isinstance(values, list):
                 lsm_data["denials"][key] = [redact(str(value)) for value in values]
     put("lsm.json", lsm_data)
-    put("core2-analysis.md", report._core2_section(conn, since))
+    put("faultcore-analysis.md", report._faultcore_section(conn, since))
     tri_cases = triage.cases(conn, limit=10000)
     for case_row in tri_cases:
         for key in ("process", "signature", "detail", "notes"):
@@ -148,7 +148,7 @@ def make_bundle(conn, reason: str = "manual", hours: int = 24, make_tar: bool = 
             rel = os.path.relpath(raw_path, str(config.ROOT))
             case_row["path"] = rel if not rel.startswith("..") else os.path.basename(raw_path)
     put("triage-cases.json", tri_cases)
-    put("triage-index.md", read_text(config.TRIAGE_DIR / "index.md") or "# Core-2 triage queue\n")
+    put("triage-index.md", read_text(config.TRIAGE_DIR / "index.md") or "# Fault-core triage queue\n")
     redacted_findings = detect.list_findings(conn, limit=1000)
     for finding in redacted_findings:
         finding["detail"] = redact(finding.get("detail") or "")
@@ -190,7 +190,7 @@ def make_bundle(conn, reason: str = "manual", hours: int = 24, make_tar: bool = 
             "home directory replaced with /home/<user>",
             "hostname, email, MAC, UUID, IPv4 and serial numbers masked",
             "journal identities and raw journal records dropped",
-            "physical core 2 correlation retained (never omitted)",
+            "fault-core correlation retained (never omitted)",
         ],
     }
     body = json.dumps(manifest, indent=2, sort_keys=True)

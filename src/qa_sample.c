@@ -238,25 +238,6 @@ static void emit_freq(FILE *out)
     fputs("}", out);
 }
 
-static void emit_core2(FILE *out)
-{
-    fputs("\"core2\":{\"physical_id\":2,\"logical\":[", out);
-    int first = 1;
-    for (int i = 0; i < 4096; i++) {
-        char p[160], *id;
-        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
-        id = read_file(p);
-        if (!id) break;
-        if (atoi(id) == 2) {
-            if (!first) fputc(',', out);
-            first = 0;
-            fprintf(out, "%d", i);
-        }
-        free(id);
-    }
-    fputs("]}", out);
-}
-
 /* ---------- processes ---------- */
 struct proc_row {
     int pid, ppid, threads, last_cpu, nr_threads;
@@ -401,8 +382,6 @@ int main(void)
     emit_freq(stdout);
     fputc(',', stdout);
     emit_thermals(stdout);
-    fputc(',', stdout);
-    emit_core2(stdout);
     fputc(',', stdout);
     emit_procs(stdout);
     fputs("}\n", stdout);

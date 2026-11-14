@@ -95,9 +95,9 @@ CATEGORIES: dict[str, dict[str, str]] = {
     },
     "crashes": {
         "label": "Crashes",
-        "description": "Captured crashes and whether physical core 2 was involved.",
+        "description": "Captured crashes and whether the fault core was involved.",
         "sql": (
-            "SELECT id, ts, comm, sig, core2_involved, cpus_allowed, exe, "
+            "SELECT id, ts, comm, sig, faultcore_involved, cpus_allowed, exe, "
             "fingerprint, context, pid, corefile "
             "FROM crashes ORDER BY ts DESC, id DESC LIMIT {limit}"
         ),
@@ -220,13 +220,13 @@ CATEGORIES: dict[str, dict[str, str]] = {
             "ORDER BY ts DESC, id DESC LIMIT {limit}"
         ),
     },
-    "core2": {
-        "label": "Core 2 cases",
-        "description": "Physical core 2 triage cases, verdicts and evidence paths.",
+    "faultcore": {
+        "label": "Fault-core cases",
+        "description": "Fault-core triage cases, verdicts and evidence paths.",
         "sql": (
             "SELECT id, case_key, created, updated, kind, verdict, process, "
             "signature, status, event_ts, affinity, notes, path, detail "
-            "FROM core2_cases ORDER BY updated DESC, id DESC LIMIT {limit}"
+            "FROM faultcore_cases ORDER BY updated DESC, id DESC LIMIT {limit}"
         ),
     },
     "crosschecks": {
@@ -285,7 +285,7 @@ CATEGORY_SOURCES = {
     "deep": "deep_runs",
     "bundles": "bundles",
     "runs": "runs",
-    "core2": "core2_cases",
+    "faultcore": "faultcore_cases",
     "crosschecks": "crosschecks",
     "notifications": "notifications",
     "reports": "reports",
@@ -537,7 +537,7 @@ def _filtered_category_sql(
             params.append(since)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return (
-            "SELECT id, ts, comm, sig, core2_involved, cpus_allowed, exe, "
+            "SELECT id, ts, comm, sig, faultcore_involved, cpus_allowed, exe, "
             "fingerprint, context, pid, corefile "
             f"FROM crashes{where} "
             f"ORDER BY ts DESC, id DESC LIMIT {limit}",

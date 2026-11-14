@@ -37,7 +37,7 @@ def component_for_crash(row: dict) -> tuple[str, str]:
         str(row.get(key) or "") for key in ("comm", "exe", "sig", "context")
     )
     vendor = classify.vendor_for(blob)
-    if row.get("core2_involved") == 1 and vendor == "local":
+    if row.get("faultcore_involved") == 1 and vendor == "local":
         vendor = "hardware"  # affinity evidence names the platform, not a package
     return vendor, (row.get("comm") or row.get("exe") or "unknown")
 
@@ -120,7 +120,7 @@ def clusters_for_boot(conn, boot: dict) -> list[dict]:
             row["ts"],
             {"sig": row.get("sig"), "comm": row.get("comm"),
              "cpus_allowed": row.get("cpus_allowed"),
-             "core2_involved": row.get("core2_involved")},
+             "faultcore_involved": row.get("faultcore_involved")},
             1, True,
             _display_text(signature, signature),
         )

@@ -20,7 +20,7 @@ import socket
 from collections import Counter
 from datetime import timedelta
 
-from . import config, db
+from . import config, db, faultcore
 from .util import iso, parse_iso, read_text, run, sha256_text, utcnow
 
 
@@ -53,19 +53,15 @@ def _cpu(out: dict) -> None:
     _put(out, "L0-platform", "cpu/logical_count", os.cpu_count())
     _put(out, "L0-platform", "cpu/online", read_text("/sys/devices/system/cpu/online"))
 
-    found = []
-    for path in sorted(glob.glob("/sys/devices/system/cpu/cpu[0-9]*/topology/core_id")):
-        cpu = re.search(r"cpu(\d+)/", path)
-        if not cpu:
-            continue
-        core_id = read_text(path)
-        if core_id == str(config.CORE2_PHYSICAL_ID):
-            found.append(int(cpu.group(1)))
-    _put(out, "L0-platform", "cpu/core2_logical", ",".join(map(str, found)))
-    _put(
-        out, "L0-platform", "cpu/core2_siblings",
-        read_text("/sys/devices/system/cpu/cpu2/topology/thread_siblings_list"),
-    )
+    topo = faultcore.topology()
+    _put(out, "L0-platform", "cpu/faultcore_state", topo.get("state"))
+    _put(out, "L0-platform", "cpu/faultcore_configured",
+         ",".join(str(cpu) for cpu in topo.get("configured") or []))
+    _put(out, "L0-platform", "cpu/faultcore_logical",
+         ",".join(str(cpu) for cpu in topo.get("logical") or []) or "undetermined")
+    _put(out, "L0-platform", "cpu/faultcore_physical_id", topo.get("physical_id"))
+    _put(out, "L0-platform", "cpu/faultcore_siblings",
+         ",".join(str(cpu) for cpu in topo.get("logical") or []) or "undetermined")
 
     # turbo/boost knobs explain frequency variance in crash reports
     _put(out, "L0-platform", "cpu/boost", read_text("/sys/devices/system/cpu/cpufreq/boost"))

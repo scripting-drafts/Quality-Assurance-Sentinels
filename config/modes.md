@@ -52,5 +52,5 @@ environment variable read by `bin/qa`.
 - `QA_MIN_FREE_MIB=1024` — last-resort disk guard; ingestion pauses below it so
   the QA job cannot fill the disk and become the outage.
 
-Two things are not limits and stay fixed: physical-core-2 evidence is always
+Two things are not limits and stay fixed: fault-core evidence is always
 recorded, and exported bundles/tickets are always redacted of operator identity.

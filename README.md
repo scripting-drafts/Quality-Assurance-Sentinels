@@ -6,7 +6,7 @@
 
 QA Sentinels periodically samples the system, examines journal and crash records, and organizes findings into reports and verifiable evidence bundles. When an incident warrants closer inspection, it can queue a separate, more privileged tracing run. It also helps correlate repeated failures and prepare vendor bug-report drafts; it does not submit tickets automatically.
 
-The project pays particular attention to physical CPU core 2. Core affinity is captured as diagnostic context.
+The project pays particular attention to the fault core configured by faultlab. Core affinity is captured as diagnostic context.
 
 ## How it works
 
@@ -93,7 +93,7 @@ To remove the user cron entries installed by this project:
 ## Investigate a crash or unexpected shutdown
 
 1. **Review boot history.** `./bin/qa boots --limit 20` classifies recorded boots. An unclean or silent stop is a lead to investigate, not a definitive root-cause diagnosis.
-2. **Review findings.** `./bin/qa findings` lists detected events; `./bin/qa triage` shows the core-2 investigation queue.
+2. **Review findings.** `./bin/qa findings` lists detected events; `./bin/qa triage` shows the fault-core investigation queue.
 3. **Correlate prior events.** `./bin/qa correlate --days 30` looks for component signatures preceding unexpected stops, including recurrence across boots.
 4. **Follow a signature.** `./bin/qa trace '<message-or-fingerprint>'` brings together related information from different layers.
 5. **Create and validate evidence.** `./bin/qa evidence --reason "unexpected shutdown" --hours 24` produces an evidence bundle. Use `./bin/qa verify PATH_TO_BUNDLE` to check a bundle's manifest and hashes.
@@ -119,7 +119,7 @@ Layer 2 is deliberately separate from the ordinary monitor. It can use privilege
 ./bin/qa deep --finding 1 --duration 30 --enqueue
 ```
 
-Replace `1` with an actual finding ID. A configured systemd path unit watches `triage/core2/deep-requests/` and processes queued requests. The default configuration can automatically queue layer-2 work for critical findings (`QA_DEEP_AUTO=1`); execution still depends on a working layer-2 deployment.
+Replace `1` with an actual finding ID. A configured systemd path unit watches `triage/faultcore/deep-requests/` and processes queued requests. The default configuration can automatically queue layer-2 work for critical findings (`QA_DEEP_AUTO=1`); execution still depends on a working layer-2 deployment.
 
 For manual tracing, inspect permissions and the impact first:
 

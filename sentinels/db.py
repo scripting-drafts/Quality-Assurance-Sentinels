@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS crashes (
     sig TEXT,
     corefile TEXT,
     cpus_allowed TEXT,
-    core2_involved INTEGER,
+    faultcore_involved INTEGER,
     context TEXT,
     fingerprint TEXT UNIQUE
 );
@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS ticket_drafts (
     title TEXT,
     issue_key TEXT UNIQUE
 );
-CREATE TABLE IF NOT EXISTS core2_cases (
+CREATE TABLE IF NOT EXISTS faultcore_cases (
     id INTEGER PRIMARY KEY,
     case_key TEXT UNIQUE,
     created TEXT NOT NULL,
@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS core2_cases (
     notes TEXT,
     path TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_core2_status ON core2_cases(status, verdict);
+CREATE INDEX IF NOT EXISTS idx_faultcore_status ON faultcore_cases(status, verdict);
 CREATE TABLE IF NOT EXISTS findings (
     id INTEGER PRIMARY KEY,
     fingerprint TEXT UNIQUE,
@@ -279,8 +279,75 @@ def connect_readonly() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_legacy_names(conn: sqlite3.Connection) -> None:
+    """Rename the pre-faultcore schema without dropping collected history."""
+    tables = {
+        row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "core2_cases" in tables:
+        if "faultcore_cases" not in tables:
+            conn.execute("ALTER TABLE core2_cases RENAME TO faultcore_cases")
+        else:
+            conn.execute(
+                "INSERT OR IGNORE INTO faultcore_cases SELECT * FROM core2_cases"
+            )
+            conn.execute("DROP TABLE core2_cases")
+        conn.execute("DROP INDEX IF EXISTS idx_core2_status")
+
+    crash_columns = {row["name"] for row in conn.execute("PRAGMA table_info(crashes)")}
+    if "core2_involved" in crash_columns and "faultcore_involved" not in crash_columns:
+        conn.execute(
+            "ALTER TABLE crashes RENAME COLUMN core2_involved TO faultcore_involved"
+        )
+
+    if "findings" in tables:
+        legacy = conn.execute(
+            "SELECT id, fingerprint, count, last_ts FROM findings "
+            "WHERE fingerprint LIKE 'core2|%'"
+        ).fetchall()
+        for row in legacy:
+            new_fingerprint = row["fingerprint"].replace("core2|", "faultcore|", 1)
+            existing = conn.execute(
+                "SELECT id, count, last_ts FROM findings WHERE fingerprint=?",
+                (new_fingerprint,),
+            ).fetchone()
+            if existing:
+                count = int(existing["count"] or 1) + int(row["count"] or 1)
+                last_ts = max(existing["last_ts"] or "", row["last_ts"] or "")
+                conn.execute(
+                    "UPDATE findings SET count=?, last_ts=? WHERE id=?",
+                    (count, last_ts or None, existing["id"]),
+                )
+                conn.execute("DELETE FROM findings WHERE id=?", (row["id"],))
+            else:
+                conn.execute(
+                    "UPDATE findings SET fingerprint=? WHERE id=?",
+                    (new_fingerprint, row["id"]),
+                )
+        conn.execute(
+            "UPDATE findings SET rule='faultcore.'||substr(rule,7) "
+            "WHERE rule LIKE 'core2.%'"
+        )
+        conn.execute(
+            "UPDATE findings SET rule='crash.faultcore' WHERE rule='crash.core2'"
+        )
+
+    if "meta" in tables:
+        for old, new in (
+            ("core2_ab_offset", "faultcore_ab_offset"),
+            ("core2_ab_mtime", "faultcore_ab_mtime"),
+        ):
+            conn.execute(
+                "UPDATE OR IGNORE meta SET key=? WHERE key=?", (new, old)
+            )
+            conn.execute("DELETE FROM meta WHERE key=?", (old,))
+
+
 def init() -> None:
     with connect() as conn:
+        _migrate_legacy_names(conn)
         conn.executescript(SCHEMA)
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
         if "count" not in cols:

@@ -20,7 +20,7 @@ Three options:
 3. `sudo root/collect-root-evidence.sh` — one-shot read-only hardware/MCE dump.
 
 Layer 1 never has tracing capabilities. Layer 2 starts only when a JSON request
-appears in `triage/core2/deep-requests/`, then archives it after the run. Manual run:
+appears in `triage/faultcore/deep-requests/`, then archives it after the run. Manual run:
 
     sudo ~/QA-Sentinels/bin/qa deep --case 1 --duration 30 --perf-record
 

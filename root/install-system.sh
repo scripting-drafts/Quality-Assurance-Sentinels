@@ -168,7 +168,7 @@ Description=Trigger $PROJECT_NAME layer-2 deep trace on queued requests
 Documentation=file://$ROOT/README.md
 
 [Path]
-PathExistsGlob=$ROOT/triage/core2/deep-requests/*.json
+PathExistsGlob=$ROOT/triage/faultcore/deep-requests/*.json
 Unit=qa-sentinel-deep.service
 
 [Install]

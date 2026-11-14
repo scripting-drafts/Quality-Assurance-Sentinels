@@ -151,10 +151,10 @@ def parse_cpu_list(spec: str | None) -> set[int] | None:
     return cpus or None
 
 
-def core2_verdict(mask: set[int] | None) -> int | None:
-    if mask is None:
+def faultcore_verdict(mask: set[int] | None) -> int | None:
+    if mask is None or not config.FAULT_CORE_CPUS:
         return None
-    return 1 if any(c in mask for c in config.CORE2_CPUS) else 0
+    return 1 if any(c in mask for c in config.FAULT_CORE_CPUS) else 0
 
 
 def _nearest_proc(conn, pid: int, ts: str) -> dict | None:
@@ -203,7 +203,7 @@ def ingest_coredumps(conn, days: int = 30) -> int:
 
         proc = _nearest_proc(conn, pid, ts_s)
         mask = parse_cpu_list(proc.get("cpus_allowed") if proc else None)
-        verdict = core2_verdict(mask)
+        verdict = faultcore_verdict(mask)
 
         info_rc, info_out, _ = run(
             ["coredumpctl", "info", str(pid), "--no-pager"], timeout=45
@@ -213,7 +213,7 @@ def ingest_coredumps(conn, days: int = 30) -> int:
 
         conn.execute(
             "INSERT OR IGNORE INTO crashes"
-            "(ts,pid,comm,exe,sig,corefile,cpus_allowed,core2_involved,context,fingerprint)"
+            "(ts,pid,comm,exe,sig,corefile,cpus_allowed,faultcore_involved,context,fingerprint)"
             " VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
                 ts_s,
@@ -237,6 +237,7 @@ def ingest_minidumps(conn) -> int:
     patterns = [
         os.path.expanduser("~/.mozilla/firefox/*/minidumps/*.dmp"),
         os.path.expanduser("~/.mozilla/firefox/Crash Reports/pending/*.dmp"),
+        os.path.expanduser("~/ff-faultcore-crashes/**/*.dmp"),
         os.path.expanduser("~/ff-core2-crashes/**/*.dmp"),
         os.path.expanduser("~/ff-control-crashes/**/*.dmp"),
     ]
@@ -253,16 +254,25 @@ def ingest_minidumps(conn) -> int:
             fp = sha256_text(f"minidump|{path}|{st.st_mtime_ns}")[:40]
             if conn.execute("SELECT 1 FROM crashes WHERE fingerprint=?", (fp,)).fetchone():
                 continue
-            tag = "core2-run" if "core2" in path else ("control-run" if "control" in path else "profile")
+            tag = (
+                "faultcore-run" if "faultcore" in path or "core2" in path
+                else "control-run" if "control" in path
+                else "profile"
+            )
+            configured = (
+                ",".join(map(str, config.FAULT_CORE_CPUS))
+                if tag == "faultcore-run" and config.FAULT_CORE_CPUS
+                else None
+            )
             conn.execute(
                 "INSERT OR IGNORE INTO crashes"
-                "(ts,pid,comm,exe,sig,corefile,cpus_allowed,core2_involved,context,fingerprint)"
+                "(ts,pid,comm,exe,sig,corefile,cpus_allowed,faultcore_involved,context,fingerprint)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     ts_s, None, "firefox-esr",
                     "firefox-esr", "minidump", path,
-                    ",".join(map(str, config.CORE2_CPUS)) if tag == "core2-run" else None,
-                    1 if tag == "core2-run" else None,
+                    configured,
+                    1 if configured else None,
                     f"Firefox minidump ({tag}); size={st.st_size}",
                     fp,
                 ),
